@@ -1,8 +1,58 @@
 @import 'tailwindcss';
+
 :root {
+  /* Design-system tokens, from the Claude Design handoff's colors_and_type.css spec */
+  --font-sans:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+
+  --upchurch-black: #000000;
+  --upchurch-blue: #0082ff;
+  --action: var(--upchurch-blue);
+  --upchurch-green: #009500;
+  --success: var(--upchurch-green);
+
+  --bg: #ffffff;
+  --bg-subtle: #f7f7f6;
+  --bg-zebra: #fcfcfb;
+  --border-1: #e2e1de;
+  --border-2: #c9c7c2;
+
+  --neutral-700: #2d2c2a;
+  --neutral-600: #4a4845;
+  --fg-3: #6e6c68;
+  --fg-4: #9c9a95;
+
+  --warning: #b8740b;
+  --warning-surface: #fdf6ec;
+  --warning-text: #7a4d07;
+  --danger: #b91d1d;
+  --danger-surface: #fbecec;
+  --info-surface: #f0f8ff;
+
+  /* Chart-specific analytical colors (not brand colors) */
   --violet: #6e4b9e;
   --scenario: #8e2da8;
   --blue-600: #0068cc;
+  --blue-200: #8ac3ff;
+  --green-200: #8acc8a;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg-subtle);
+  color: var(--neutral-700);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
 }
 button {
   cursor: pointer;
@@ -89,7 +139,7 @@ textarea {
 }
 .chart-tooltip > strong {
   display: block;
-  font-family: Georgia, serif;
+  font-family: var(--font-serif);
   font-size: 16px;
   margin-bottom: 8px;
 }
@@ -120,7 +170,7 @@ textarea {
   padding: 10px 14px;
 }
 .month-detail h2 {
-  font-family: Georgia, serif;
+  font-family: var(--font-serif);
   margin: 0;
   font-size: 18px;
 }
@@ -143,7 +193,7 @@ textarea {
 .month-detail h3,
 .drawer h3,
 .modal h3 {
-  font-family: Georgia, serif;
+  font-family: var(--font-serif);
   font-size: 17px;
   margin: 0 0 10px;
 }
@@ -279,9 +329,7 @@ textarea {
   color: #9c9a95;
 }
 .black-card h2 {
-  font:
-    600 19px/1.35 Georgia,
-    serif;
+  font: 600 19px/1.35 var(--font-serif);
   margin: 10px 0 16px;
 }
 .deadline {
@@ -351,9 +399,7 @@ textarea {
 .section-title h2,
 .help-intro h2,
 .help-columns h2 {
-  font:
-    600 20px Georgia,
-    serif;
+  font: 600 20px var(--font-serif);
   margin: 3px 0;
 }
 .section-title p {
@@ -531,9 +577,7 @@ td small {
 }
 .drawer header h2,
 .modal header h2 {
-  font:
-    600 21px Georgia,
-    serif;
+  font: 600 21px var(--font-serif);
   margin: 3px 0;
 }
 .drawer header p {
@@ -659,9 +703,7 @@ td small {
   min-height: 560px;
 }
 .scenario-panel > h2 {
-  font:
-    600 20px Georgia,
-    serif;
+  font: 600 20px var(--font-serif);
   margin: 4px 0 16px;
 }
 .plan-cards {
@@ -702,9 +744,7 @@ td small {
   padding: 16px;
 }
 .proposed-card h3 {
-  font:
-    600 18px Georgia,
-    serif;
+  font: 600 18px var(--font-serif);
   margin: 5px 0;
 }
 .bottleneck-list > div {
@@ -820,9 +860,7 @@ td small {
   padding: 14px;
 }
 .capacity-preview header h2 {
-  font:
-    600 20px Georgia,
-    serif;
+  font: 600 20px var(--font-serif);
   margin: 3px 0;
 }
 .capacity-preview .metric {
@@ -850,9 +888,7 @@ td small {
   opacity: 0.55;
 }
 .plan-name h3 {
-  font:
-    600 18px Georgia,
-    serif;
+  font: 600 18px var(--font-serif);
   display: inline-block;
   margin: 0 10px 0 0;
 }
@@ -971,9 +1007,7 @@ td small {
   color: #fff;
 }
 .help-grid h3 {
-  font:
-    600 17px Georgia,
-    serif;
+  font: 600 17px var(--font-serif);
 }
 .help-grid p {
   color: var(--fg-3);
@@ -1211,9 +1245,7 @@ td small {
   padding: 20px;
 }
 .date-preview h2 {
-  font:
-    700 22px Georgia,
-    serif;
+  font: 700 22px var(--font-serif);
   margin: 8px 0;
 }
 .date-preview > button {

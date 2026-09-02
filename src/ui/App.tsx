@@ -3,7 +3,6 @@ import {
   Archive,
   ArrowLeft,
   ArrowRight,
-  BookOpen,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -30,7 +29,6 @@ import {
   LABOR_CATEGORIES,
   MONTHS,
   PROJECTS,
-  sampleDataService,
 } from '../data/sampleData';
 import type {
   CapacityAction,
@@ -100,6 +98,10 @@ export function App() {
   const plan = plans.find((p) => p.id === planId) || plans[0];
   const result = useMemo(() => analyze(live, category), [live, category]);
   const summary = useMemo(() => metrics(result), [result]);
+  const savedResult = useMemo(
+    () => analyze(saved, category),
+    [saved, category],
+  );
   const dirty = !same(live, saved);
   const assumptions = live.capacity[category];
   const display = (value: number) =>
@@ -146,6 +148,25 @@ export function App() {
     setSaved(clone(live));
     setUndo([]);
     setToast(`“${plan.name}” saved.`);
+  };
+  const saveAsNewPlan = (name: string) => {
+    const id = `plan-${Date.now()}`;
+    const created: WorkforcePlan = {
+      id,
+      name,
+      status: 'Draft',
+      department: plan.department,
+      owner: plan.owner,
+      description: `Saved from “${plan.name}” in the Scenario Builder.`,
+      sourceDate: plan.sourceDate,
+      updatedDate: 'Sep 2, 2026',
+      config: clone(live),
+    };
+    setPlans((items) => [...items, created]);
+    setPlanId(id);
+    setSaved(clone(live));
+    setUndo([]);
+    setToast(`“${name}” created.`);
   };
   const openProposed = () => {
     setModalSnapshot(clone(live));
@@ -272,6 +293,8 @@ export function App() {
             plan={plan}
             category={category}
             actions={live.actions}
+            dirty={dirty}
+            savedScenario={savedResult.scenario}
           />
         )}
         {tab === 'projects' && (
@@ -304,6 +327,7 @@ export function App() {
               setModal('action');
             }}
             save={saveCurrent}
+            saveAsNew={saveAsNewPlan}
             cancel={() => {
               setLive(clone(saved));
               setUndo([]);
@@ -375,11 +399,7 @@ export function App() {
           close={() => setModal(null)}
         />
       )}
-      {toast && (
-        <div className="toast" role="status">
-          {toast}
-        </div>
-      )}
+      {toast && <output className="toast">{toast}</output>}
     </div>
   );
 }
@@ -504,6 +524,8 @@ function Dashboard({
   plan,
   category,
   actions,
+  dirty,
+  savedScenario,
 }: {
   result: ReturnType<typeof analyze>;
   summary: ReturnType<typeof metrics>;
@@ -514,6 +536,8 @@ function Dashboard({
   plan: WorkforcePlan;
   category: LaborCategory;
   actions: CapacityAction[];
+  dirty: boolean;
+  savedScenario: number[];
 }) {
   const data = MONTHS.map((month, i) => ({
     month,
@@ -526,6 +550,7 @@ function Dashboard({
     subcontract: result.subcontract[i],
     overtime: result.overtime[i],
     gap: result.gap[i],
+    ghost: savedScenario[i],
   }));
   const recs = recommendations(result);
   const hires = actions
@@ -563,7 +588,7 @@ function Dashboard({
         <Metric
           label="PEAK SHORTAGE VS EXISTING"
           value={display(summary.peakVsExisting)}
-          detail={`In ${summary.peakVsExistingMonth}, against existing internal capacity.`}
+          detail={`In ${summary.peakVsExistingMonth}, against ${summary.existingAtPeakVsExisting.toFixed(1)} existing internal FTE.`}
         />
         <Metric
           label="PEAK UNRESOLVED GAP"
@@ -586,7 +611,7 @@ function Dashboard({
           label="TEMPORARY CAPACITY REQUIRED"
           value={`${subPeak} peak`}
           tone="warning"
-          detail="Subcontract capacity across the window."
+          detail={`${summary.subcontractPersonMonths.toFixed(0)} subcontract person-months across the window.`}
         />
         <Metric
           label="NEXT ACTION DEADLINE"
@@ -702,6 +727,18 @@ function Dashboard({
                 fill="url(#gapHatch)"
                 stroke="#b91d1d"
               />
+              {dirty && (
+                <Line
+                  dataKey="ghost"
+                  name="Saved plan (previewing unsaved changes)"
+                  stroke="#8e2da8"
+                  strokeOpacity={0.16}
+                  strokeWidth={4}
+                  dot={false}
+                  isAnimationActive={false}
+                  legendType="none"
+                />
+              )}
               <Line
                 dataKey="hard"
                 stroke="#000"
@@ -1227,14 +1264,14 @@ function ProjectDrawer({
   display: (v: number) => string;
   close: () => void;
 }) {
-  const shift = config.shifts[project.id] || 0,
-    prob =
-      project.type === 'Hard'
-        ? 100
-        : (config.probabilities[project.id] ?? project.planningProbability);
+  const prob =
+    project.type === 'Hard'
+      ? 100
+      : (config.probabilities[project.id] ?? project.planningProbability);
   return (
     <div
       className="overlay drawer-overlay"
+      role="presentation"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) close();
       }}
@@ -1303,7 +1340,16 @@ function ProjectDrawer({
               <h3>Work packages — rolled into parent exactly once</h3>
               {project.workPackages.map((w) => (
                 <div className="package-line" key={w.id}>
-                  <CheckButton checked={w.included} onClick={() => {}} />
+                  <CheckButton
+                    checked={config.packageIncluded[w.id] ?? w.included}
+                    onClick={() =>
+                      mutate((c) => {
+                        c.packageIncluded[w.id] = !(
+                          c.packageIncluded[w.id] ?? w.included
+                        );
+                      })
+                    }
+                  />
                   <span>
                     <strong>{w.name}</strong>
                     <small>
@@ -1381,6 +1427,7 @@ function Scenario({
   openNewAction,
   editAction,
   save,
+  saveAsNew,
   cancel,
 }: {
   step: number;
@@ -1397,6 +1444,7 @@ function Scenario({
   openNewAction: (k: CapacityAction['kind']) => void;
   editAction: (a: CapacityAction) => void;
   save: () => void;
+  saveAsNew: (name: string) => void;
   cancel: () => void;
 }) {
   return (
@@ -1633,7 +1681,7 @@ function Scenario({
               onClick={() => {
                 const name = prompt('New plan name', 'New Workforce Plan');
                 if (!name) return;
-                alert(`Use Duplicate on Saved Plans to create “${name}”.`);
+                saveAsNew(name);
               }}
             >
               SAVE AS NEW PLAN
@@ -1741,11 +1789,12 @@ function Capacity({
                         {cat}
                       </button>
                     </td>
-                    {fields.map(([key]) => (
+                    {fields.map(([key, fieldLabel]) => (
                       <td key={key}>
                         <input
                           type="number"
                           min="0"
+                          aria-label={`${cat} ${fieldLabel}`}
                           value={row[key]}
                           onChange={(e) =>
                             mutate((c) => {

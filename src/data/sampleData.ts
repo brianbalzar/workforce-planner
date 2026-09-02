@@ -568,6 +568,7 @@ const config = (
   ),
   included: Object.fromEntries(PROJECTS.map((p) => [p.id, true])),
   shifts: {},
+  packageIncluded: {},
   proposedIncluded: kind === 'growth' || kind === 'full',
   proposed: structuredClone(ATLAS),
   actions: structuredClone(

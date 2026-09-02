@@ -134,6 +134,7 @@ export interface ScenarioConfig {
   probabilities: Record<string, number>;
   included: Record<string, boolean>;
   shifts: Record<string, number>;
+  packageIncluded: Record<string, boolean>;
   proposedIncluded: boolean;
   proposed: ProposedProject;
   actions: CapacityAction[];

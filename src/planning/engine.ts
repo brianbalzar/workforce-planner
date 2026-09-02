@@ -19,11 +19,14 @@ const defaultWpValues: Record<string, number> = {
   'atlas-w3': 20,
 };
 
-export function rollupProjectCurve(project: Project): number[] {
+export function rollupProjectCurve(
+  project: Project,
+  overrides?: Record<string, boolean>,
+): number[] {
   if (!project.workPackages?.length) return [...project.curve];
   const out = zeros();
   project.workPackages
-    .filter((w) => w.included)
+    .filter((w) => overrides?.[w.id] ?? w.included)
     .forEach((w) => w.curve.forEach((v, i) => (out[i] += v)));
   return out.map(round3);
 }
@@ -77,7 +80,7 @@ export function demand(
   const factor = CATEGORY_FACTORS[category] || 1;
   PROJECTS.forEach((p) => {
     if (cfg.included[p.id] === false) return;
-    const source = rollupProjectCurve(p),
+    const source = rollupProjectCurve(p, cfg.packageIncluded),
       shift = cfg.shifts[p.id] || 0,
       prob =
         p.type === 'Hard'
@@ -235,6 +238,9 @@ export function metrics(r: AnalysisResult) {
     personMonths: r.gap.reduce((s, g) => s + g, 0),
     peakVsExisting,
     peakVsExistingMonth: MONTHS[peakVsExistingIndex],
+    existingAtPeakVsExisting: r.existing[peakVsExistingIndex],
+    subcontractPersonMonths: r.subcontract.reduce((s, v) => s + v, 0),
+    temporaryCapacityPeak: Math.max(...r.subcontract),
     unconfirmedPeak: Math.max(...r.unconfirmed),
     confidence:
       peak > 0.05
