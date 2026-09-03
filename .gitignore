@@ -37,3 +37,6 @@ next-env.d.ts
 /outputs/
 /work/
 tsconfig.tsbuildinfo
+
+# scratch output from Claude Code sessions
+/Claude outputs/
