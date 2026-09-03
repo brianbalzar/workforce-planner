@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import upchurchLogo from '../assets/upchurch-horizontal-reversed.png';
 import {
   Archive,
   ArrowLeft,
@@ -219,7 +220,7 @@ export function App() {
     <div className="app-shell">
       <div className="status-strip">
         <div>
-          <strong>UPCHURCH</strong>
+          <img src={upchurchLogo} alt="Upchurch" className="brand-mark" />
           <span />
           WORKFORCE PLANNER
         </div>
@@ -496,7 +497,7 @@ function Field({
 }) {
   return (
     <label>
-      {label}
+      <span className="field-label">{label}</span>
       {children}
     </label>
   );
