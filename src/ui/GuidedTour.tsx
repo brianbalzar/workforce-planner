@@ -46,6 +46,13 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     tab: 'dashboard',
+    selector: '[data-tour="quick-add"]',
+    title: 'Add from anywhere',
+    body: 'These two buttons are always in the header. Add Proposed Project tests new demand. Add Capacity Action opens a hire, subcontract, overtime, leave, or attrition change — the same actions Scenario Builder step 5 uses, without leaving the screen you\u2019re on.',
+    placement: 'bottom',
+  },
+  {
+    tab: 'dashboard',
     selector: '[data-tour="bottleneck-chart"]',
     title: 'Demand versus capacity',
     body: 'The lines are demand — hard backlog, expected, and full scenario workload. The stacked bars are executable capacity. Wherever a line rises above the bars, that month has a staffing gap.',

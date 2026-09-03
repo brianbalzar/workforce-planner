@@ -297,9 +297,12 @@ export function App() {
           >
             COMPARE PLANS
           </button>
-          <button className="primary" onClick={openProposed}>
-            ADD PROPOSED PROJECT
-          </button>
+          <div className="quick-actions" data-tour="quick-add">
+            <CapacityActionMenu onSelect={openNewAction} />
+            <button className="primary" onClick={openProposed}>
+              ADD PROPOSED PROJECT
+            </button>
+          </div>
         </div>
       </header>
       <nav className="tabs" aria-label="Primary navigation" data-tour="tabs">
@@ -497,7 +500,7 @@ function HelpMenu({
     };
   }, [open]);
   return (
-    <div className="help-menu" ref={ref}>
+    <div className="header-menu" ref={ref}>
       <button
         data-tour="help-menu"
         aria-haspopup="menu"
@@ -507,7 +510,7 @@ function HelpMenu({
         HELP <ChevronDown size={14} />
       </button>
       {open && (
-        <div className="help-menu-list" role="menu">
+        <div className="header-menu-list" role="menu">
           <button
             role="menuitem"
             onClick={() => {
@@ -526,6 +529,66 @@ function HelpMenu({
           >
             Open the pilot guide
           </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const CAPACITY_ACTION_KINDS: [CapacityAction['kind'], string][] = [
+  ['hire', 'Permanent hire'],
+  ['subcontract', 'Subcontract'],
+  ['overtime', 'Overtime'],
+  ['leave', 'Leave'],
+  ['attrition', 'Attrition'],
+];
+
+function CapacityActionMenu({
+  onSelect,
+}: {
+  onSelect: (kind: CapacityAction['kind']) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node))
+        setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  return (
+    <div className="header-menu" ref={ref}>
+      <button
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        ADD CAPACITY ACTION <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="header-menu-list" role="menu">
+          {CAPACITY_ACTION_KINDS.map(([kind, label]) => (
+            <button
+              key={kind}
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onSelect(kind);
+              }}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       )}
     </div>

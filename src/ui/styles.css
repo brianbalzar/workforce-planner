@@ -2208,11 +2208,11 @@ td .muted {
   gap: 8px;
 }
 
-/* ---- Help menu ---- */
-.help-menu {
+/* ---- Header dropdown menus (Help, Add Capacity Action) ---- */
+.header-menu {
   position: relative;
 }
-.help-menu-list {
+.header-menu-list {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
@@ -2224,7 +2224,7 @@ td .muted {
   border: 1px solid var(--border-2);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
 }
-.help-menu-list button {
+.header-menu-list button {
   border: none;
   border-bottom: 1px solid var(--border-1);
   background: #fff;
@@ -2235,10 +2235,14 @@ td .muted {
   letter-spacing: normal;
   text-align: left;
 }
-.help-menu-list button:last-child {
+.header-menu-list button:last-child {
   border-bottom: none;
 }
-.help-menu-list button:hover {
+.header-menu-list button:hover {
   background: var(--bg-subtle);
   border-color: var(--border-1) !important;
+}
+.quick-actions {
+  display: flex;
+  gap: 10px;
 }
