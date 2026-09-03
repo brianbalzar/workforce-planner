@@ -1,15 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { ATLAS, INITIAL_PLANS, PROJECTS } from '../data/sampleData';
+import {
+  ATLAS,
+  INITIAL_PLANS,
+  LABOR_SOURCE_MAP,
+  PROJECTS,
+} from '../data/sampleData';
 import {
   actionStartDate,
   analyze,
+  assumptionFlagsForProject,
   demand,
+  forecastFreshness,
   formatValue,
   hireRampFactors,
+  impliedPeopleFromHours,
   metrics,
+  monthlyComposition,
+  peakCrewFromWeekly,
+  peopleMetricsForProject,
   proposedCurve,
   resolveWorkPackageCurve,
   rollupProjectCurve,
+  totalForecastHours,
   validateWorkPackages,
 } from './engine';
 
@@ -210,5 +222,103 @@ describe('dates, units, and work packages', () => {
     expect(m.addedCapacityFteMonths).toBeCloseTo(expectedAdded, 6);
     expect(m.addedCapacityFteMonths).toBeGreaterThan(0);
     expect(m.overtimePeak).toBeCloseTo(Math.max(...result.overtime), 6);
+  });
+});
+
+describe('portfolio-planning rollups', () => {
+  const p1 = PROJECTS.find((p) => p.id === 'p1')!;
+  const p3 = PROJECTS.find((p) => p.id === 'p3')!;
+  const p4 = PROJECTS.find((p) => p.id === 'p4')!;
+  const p5 = PROJECTS.find((p) => p.id === 'p5')!;
+  const TODAY = new Date(Date.UTC(2026, 8, 2));
+
+  it('rolls weekly crew up to a monthly PEAK, not an average (10/10/25/10 -> 25)', () => {
+    expect(peakCrewFromWeekly([10, 10, 25, 10])).toEqual([25]);
+    // A second month appended still resolves independently.
+    expect(peakCrewFromWeekly([10, 10, 25, 10, 8, 8, 8, 8])).toEqual([25, 8]);
+  });
+
+  it('derives implied headcount from hours, which falls as the assumed workweek lengthens', () => {
+    const at40 = impliedPeopleFromHours(1000, 1, 40);
+    const at50 = impliedPeopleFromHours(1000, 1, 50);
+    const at60 = impliedPeopleFromHours(1000, 1, 60);
+    expect(at40).toBeGreaterThan(at50);
+    expect(at50).toBeGreaterThan(at60);
+  });
+
+  it('keeps peak crew and average/implied people distinct and clearly sourced', () => {
+    const m1 = peopleMetricsForProject(p1);
+    expect(m1.basis).toBe('weekly-peak');
+    expect(m1.peakCrew).toBe(9); // from weeklyCrew [5, 5, 9, 5], not the FTE curve peak.
+    expect(m1.peakCrew).not.toBe(m1.averageImpliedPeople);
+
+    const m5 = peopleMetricsForProject(p5);
+    expect(m5.basis).toBe('even-spread-estimate');
+    expect(m5.monthlyPlannedPeople).toBeUndefined();
+
+    const m4 = peopleMetricsForProject(p4);
+    expect(m4.basis).toBe('monthly-planned');
+    expect(m4.monthlyPlannedPeople).toBe(m4.averageImpliedPeople);
+  });
+
+  it('total forecast hours at the 40-hour baseline reconcile with the implied-people formula', () => {
+    const p2 = PROJECTS.find((p) => p.id === 'p2')!;
+    const hours = totalForecastHours(p2, 40);
+    const activeMonths = p2.curve.filter((v) => v > 0).length;
+    const implied = impliedPeopleFromHours(hours, activeMonths, 40);
+    const p2Metrics = peopleMetricsForProject(p2);
+    expect(implied).toBeCloseTo(p2Metrics.averageImpliedPeople, 3);
+  });
+
+  it('classifies forecast freshness against a configurable threshold', () => {
+    expect(forecastFreshness(p1.lastRevisionDate, TODAY)).toBe('Current');
+    expect(forecastFreshness('2026-07-20', TODAY)).toBe('Approaching stale');
+    expect(forecastFreshness('2026-06-15', TODAY)).toBe('Stale');
+    expect(forecastFreshness(p4.lastRevisionDate, TODAY)).toBe('Missing');
+  });
+
+  it('flags stale, missing, review-quality, and even-spread projects without hiding them behind one score', () => {
+    expect(assumptionFlagsForProject(p1, TODAY)).toEqual([]);
+    const p3Flags = assumptionFlagsForProject(p3, TODAY);
+    expect(p3Flags.map((f) => f.id)).toEqual(
+      expect.arrayContaining([
+        `${p3.id}-even-spread`,
+        `${p3.id}-freshness-stale`,
+      ]),
+    );
+    expect(
+      p3Flags.find((f) => f.id === `${p3.id}-freshness-stale`)?.severity,
+    ).toBe('critical');
+    const p4Flags = assumptionFlagsForProject(p4, TODAY);
+    expect(p4Flags.map((f) => f.id)).toEqual(
+      expect.arrayContaining([`${p4.id}-freshness-missing`]),
+    );
+    const p5Flags = assumptionFlagsForProject(p5, TODAY);
+    expect(p5Flags.map((f) => f.id)).toEqual(
+      expect.arrayContaining([`${p5.id}-quality-review`]),
+    );
+  });
+
+  it('never silently drops an unmapped source labor label into a generic bucket', () => {
+    expect(LABOR_SOURCE_MAP['Miscellaneous Labor']).toBeNull();
+    expect(LABOR_SOURCE_MAP.Plumbing).toBe('Plumber');
+    const unmapped = Object.entries(LABOR_SOURCE_MAP).filter(
+      ([, category]) => category === null,
+    );
+    expect(unmapped.length).toBeGreaterThan(0);
+  });
+
+  it("reconciles monthly composition series to each month's total scenario demand", () => {
+    const cfg = growth();
+    const result = demand(cfg, 'Plumber');
+    const { rows, series } = monthlyComposition(result);
+    expect(rows).toHaveLength(18);
+    expect(series).toContain('Other');
+    rows.forEach((row, i) => {
+      const total = series.reduce((s, key) => s + (row[key] as number), 0);
+      // Drivers below the 0.02 FTE inclusion threshold in demand() are the
+      // only source of rounding difference against the reported total.
+      expect(total).toBeCloseTo(result.scenario[i], 0);
+    });
   });
 });

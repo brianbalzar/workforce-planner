@@ -1,13 +1,18 @@
 import { CATEGORY_FACTORS, MONTHS, PROJECTS } from '../data/sampleData';
 import type {
   AnalysisResult,
+  AssumptionFlag,
   CapacityAction,
   DemandResult,
+  FreshnessStatus,
   LaborCategory,
+  PeopleBasis,
+  PeopleMetrics,
   Project,
   ScenarioConfig,
   Unit,
   WorkPackage,
+  WorkweekHours,
 } from '../domain/types';
 
 const N = 18;
@@ -570,4 +575,223 @@ export function validateWorkPackages(packages: WorkPackage[]) {
       issues.push(`${p.name}: start date is outside the planning window.`);
   });
   return issues;
+}
+
+// --- Portfolio-planning rollups (source forecast -> department view) ------
+// A single project's own weekly/monthly labor forecast rolls up here. These
+// functions are intentionally simple and stop at what the department
+// planner needs — they are not a re-implementation of a project-level
+// labor-tracking tool.
+
+const WEEKS_PER_MONTH = 4.33;
+
+/**
+ * Rolls weekly crew counts up into a monthly PEAK per the required rule:
+ * a month's People-view figure is the highest single week within it, never
+ * an hours-style average. Example: [10, 10, 25, 10] (one month) -> [25].
+ */
+export function peakCrewFromWeekly(
+  weeklyCrew: number[],
+  weeksPerMonth = 4,
+): number[] {
+  const months: number[] = [];
+  for (let i = 0; i < weeklyCrew.length; i += weeksPerMonth) {
+    months.push(Math.max(...weeklyCrew.slice(i, i + weeksPerMonth)));
+  }
+  return months;
+}
+
+/**
+ * Average/implied headcount from a total-hours commitment: the same hours
+ * imply fewer concurrent people as the assumed workweek gets longer. This
+ * does NOT mean a longer workweek proportionally increases capacity — it
+ * only changes how many people that many hours implies.
+ */
+export function impliedPeopleFromHours(
+  totalHours: number,
+  activeMonths: number,
+  workweekHours: WorkweekHours = 40,
+): number {
+  if (activeMonths <= 0 || workweekHours <= 0) return 0;
+  return round3(totalHours / (activeMonths * WEEKS_PER_MONTH * workweekHours));
+}
+
+/**
+ * A fabricated-but-consistent hours figure for a project, back-computed
+ * from its existing (already-FTE-scaled) demand curve at a 40-hour
+ * baseline workweek. Lets the workweek assumption below demonstrably move
+ * the implied-people figure without inventing a whole separate hours
+ * dataset per project.
+ */
+export function totalForecastHours(
+  p: Project,
+  baselineWorkweek: WorkweekHours = 40,
+): number {
+  return round3(
+    p.curve.reduce((s, v) => s + v, 0) * baselineWorkweek * WEEKS_PER_MONTH,
+  );
+}
+
+/**
+ * The three People-view metrics for a project, kept distinct per the
+ * portfolio-planning requirements: never present the average/implied
+ * figure as if it were a confirmed peak crew.
+ */
+export function peopleMetricsForProject(p: Project): PeopleMetrics {
+  const activeCurve = p.curve.filter((v) => v > 0);
+  const averageImpliedPeople = activeCurve.length
+    ? round3(activeCurve.reduce((s, v) => s + v, 0) / activeCurve.length)
+    : 0;
+
+  const curvePeak = Math.max(0, ...p.curve);
+  let peakCrew = round3(curvePeak);
+  let peakCrewIndex = p.curve.indexOf(curvePeak);
+  let basis: PeopleBasis =
+    p.method === 'Comparable-project curve'
+      ? 'even-spread-estimate'
+      : 'monthly-planned';
+
+  if (p.weeklyCrew?.length) {
+    const monthlyPeaks = peakCrewFromWeekly(p.weeklyCrew);
+    const truePeak = Math.max(...monthlyPeaks);
+    peakCrew = round3(truePeak);
+    peakCrewIndex = p.startIndex + monthlyPeaks.indexOf(truePeak);
+    basis = 'weekly-peak';
+  }
+
+  return {
+    peakCrew,
+    peakCrewMonth: MONTHS[Math.max(0, Math.min(N - 1, peakCrewIndex))],
+    averageImpliedPeople,
+    monthlyPlannedPeople:
+      basis === 'even-spread-estimate' ? undefined : averageImpliedPeople,
+    basis,
+  };
+}
+
+const DEFAULT_FRESHNESS_THRESHOLDS = { approachingDays: 30, staleDays: 60 };
+
+/** Current/Approaching stale/Stale/Missing, per a configurable threshold. */
+export function forecastFreshness(
+  lastRevisionDate: string | undefined,
+  today: Date,
+  thresholds: {
+    approachingDays: number;
+    staleDays: number;
+  } = DEFAULT_FRESHNESS_THRESHOLDS,
+): FreshnessStatus {
+  if (!lastRevisionDate) return 'Missing';
+  const revised = new Date(lastRevisionDate);
+  if (Number.isNaN(revised.getTime())) return 'Missing';
+  const ageDays = Math.floor(
+    (today.getTime() - revised.getTime()) / 86_400_000,
+  );
+  if (ageDays <= thresholds.approachingDays) return 'Current';
+  if (ageDays <= thresholds.staleDays) return 'Approaching stale';
+  return 'Stale';
+}
+
+/**
+ * A representative subset of the data-quality/assumption flag taxonomy:
+ * enough to demonstrate the pattern (severity, explanation, effect,
+ * recommended action) without hiding uncertainty behind one confidence
+ * score. Not the full flag catalog described in the portfolio-planning
+ * requirements — see the final report for what is deferred.
+ */
+export function assumptionFlagsForProject(
+  p: Project,
+  today: Date,
+): AssumptionFlag[] {
+  const flags: AssumptionFlag[] = [];
+  if (!p.weeklyCrew?.length) {
+    flags.push({
+      id: `${p.id}-even-spread`,
+      severity: p.method === 'Comparable-project curve' ? 'warning' : 'info',
+      summary:
+        'Peak crew is an even-spread estimate, not a confirmed weekly peak',
+      detail: `${p.name} has no weekly staffing histogram, so its People-view peak comes from monthly-resolution data rather than a measured weekly count. A short, sharp staffing peak within a month would not show up here.`,
+      effect:
+        'A peak-month bottleneck driven by this project may be understated.',
+      recommendation:
+        'Request a weekly (or at least bi-weekly) crew forecast if this project is a material contributor to a bottleneck month.',
+    });
+  }
+  const freshness = forecastFreshness(p.lastRevisionDate, today);
+  if (freshness === 'Missing') {
+    flags.push({
+      id: `${p.id}-freshness-missing`,
+      severity: 'warning',
+      summary: 'No forecast revision date on file',
+      detail: `${p.name} has no recorded last-revision date for its source forecast.`,
+      effect:
+        'This project cannot be checked for staleness or scored for confidence.',
+      recommendation:
+        "Record the date this project's forecast was last reviewed with its owning PM.",
+    });
+  } else if (freshness === 'Stale') {
+    flags.push({
+      id: `${p.id}-freshness-stale`,
+      severity: 'critical',
+      summary: 'Source forecast is stale',
+      detail: `${p.name}'s forecast was last revised ${p.lastRevisionDate} and is now more than ${DEFAULT_FRESHNESS_THRESHOLDS.staleDays} days old.`,
+      effect:
+        'Demand and staffing figures for this project may no longer reflect current schedule or scope.',
+      recommendation:
+        'Request a refreshed forecast before relying on this project for hiring or subcontract decisions.',
+    });
+  } else if (freshness === 'Approaching stale') {
+    flags.push({
+      id: `${p.id}-freshness-approaching`,
+      severity: 'info',
+      summary: 'Source forecast is approaching stale',
+      detail: `${p.name}'s forecast was last revised ${p.lastRevisionDate}.`,
+      effect:
+        'No effect yet — confidence will degrade if this forecast is not refreshed soon.',
+      recommendation:
+        "Confirm this project is still on the PM's refresh cadence.",
+    });
+  }
+  if (p.quality.startsWith('Review')) {
+    flags.push({
+      id: `${p.id}-quality-review`,
+      severity: 'warning',
+      summary: 'Forecast method flagged for review by its own source',
+      detail: `${p.name} uses "${p.method}" (${p.quality}).`,
+      effect:
+        'Demand attributed to this project carries more uncertainty than a cost-loaded schedule.',
+      recommendation:
+        'Prioritize this project for a scheduling/estimating review.',
+    });
+  }
+  return flags;
+}
+
+/**
+ * Buckets each month's demand drivers into a fixed set of series (the
+ * overall top contributors plus "Other") so a stacked chart has stable
+ * dataKeys across the whole window. Every month's series sum reconciles to
+ * that month's total scenario demand (drivers below the 0.02 FTE inclusion
+ * threshold in `demand()` are the only rounding difference).
+ */
+export function monthlyComposition(result: DemandResult, topN = 4) {
+  const totals = new Map<string, number>();
+  result.drivers.forEach((month) =>
+    month.forEach((d) => totals.set(d.name, (totals.get(d.name) || 0) + d.fte)),
+  );
+  const topNames = [...totals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([name]) => name);
+
+  const rows = result.drivers.map((month, i) => {
+    const row: Record<string, number | string> = { month: MONTHS[i] };
+    topNames.forEach((name) => (row[name] = 0));
+    row.Other = 0;
+    month.forEach((d) => {
+      const key = topNames.includes(d.name) ? d.name : 'Other';
+      row[key] = (row[key] as number) + d.fte;
+    });
+    return row;
+  });
+  return { rows, series: [...topNames, 'Other'] };
 }

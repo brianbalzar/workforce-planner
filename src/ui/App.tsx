@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import upchurchLogo from '../assets/upchurch-horizontal-reversed.png';
 import {
   Archive,
@@ -29,10 +29,12 @@ import {
 import {
   DEPARTMENTS,
   LABOR_CATEGORIES,
+  LABOR_SOURCE_MAP,
   MONTHS,
   PROJECTS,
 } from '../data/sampleData';
 import type {
+  AssumptionFlag,
   CapacityAction,
   LaborCategory,
   PlanStatus,
@@ -47,10 +49,14 @@ import {
   actionMilestones,
   actionStartDate,
   analyze,
+  assumptionFlagsForProject,
   datePosition,
+  forecastFreshness,
   formatDate,
   formatValue,
   metrics,
+  monthlyComposition,
+  peopleMetricsForProject,
   recommendations,
   validateWorkPackages,
 } from '../planning/engine';
@@ -76,6 +82,33 @@ const tabList: [Tab, string][] = [
 const clone = <T,>(value: T): T => structuredClone(value);
 const same = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Basic accessibility wiring shared by every modal/drawer: focuses the panel
+ * on open so keyboard and screen-reader users land inside it, and closes on
+ * Escape. Combined with role="dialog"/aria-modal on the panel element this
+ * covers REVIEW_RECOMMENDATIONS item 12.
+ */
+function useDialogA11y<T extends HTMLElement>(onEscape: () => void) {
+  const ref = useRef<T>(null);
+  const onEscapeRef = useRef(onEscape);
+  // Keep the ref pointed at the latest callback from an effect (not render)
+  // so the mount-only effect below always calls the current close handler.
+  useEffect(() => {
+    onEscapeRef.current = onEscape;
+  });
+  useEffect(() => {
+    ref.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onEscapeRef.current();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+    // Mount-only: focuses the panel once. Re-renders while the dialog is
+    // open never steal focus from whatever the user is doing.
+  }, []);
+  return ref;
+}
 
 export function App() {
   const [plans, setPlans] = useState<WorkforcePlan[]>(() => loadPlans());
@@ -257,6 +290,7 @@ export function App() {
           <button
             key={key}
             className={tab === key ? 'active' : ''}
+            aria-current={tab === key ? 'page' : undefined}
             onClick={() => setTab(key)}
           >
             {key === 'help' && <HelpCircle size={14} />} {label}
@@ -429,13 +463,18 @@ function ControlBar(p: {
 }) {
   return (
     <section className="controls">
-      <Field label="DEPARTMENT">
+      <Field
+        label="DEPARTMENT"
+        hint="Only Mechanical — Metro is modeled in this prototype."
+      >
         <select
           value={p.department}
           onChange={(e) => p.setDepartment(e.target.value)}
         >
-          {DEPARTMENTS.map((v) => (
-            <option key={v}>{v}</option>
+          {DEPARTMENTS.map((v, i) => (
+            <option key={v} disabled={i > 0}>
+              {i > 0 ? `${v} (reference only)` : v}
+            </option>
           ))}
         </select>
       </Field>
@@ -449,8 +488,11 @@ function ControlBar(p: {
           ))}
         </select>
       </Field>
-      <Field label="PLANNING WINDOW">
-        <input readOnly value="Sep 2026 — Feb 2028 · rolling 18 months" />
+      <Field
+        label="PLANNING WINDOW"
+        hint="Fixed demonstration window for this prototype, not a live rolling forecast."
+      >
+        <input readOnly value="Sep 2026 — Feb 2028 · 18-month window" />
       </Field>
       <div className="unit-control">
         <span>VIEW AS</span>
@@ -490,15 +532,18 @@ function ControlBar(p: {
 }
 function Field({
   label,
+  hint,
   children,
 }: {
   label: string;
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
     <label>
       <span className="field-label">{label}</span>
       {children}
+      {hint && <small className="field-hint">{hint}</small>}
     </label>
   );
 }
@@ -647,7 +692,28 @@ function Dashboard({
               {category} — Mechanical — Metro · {plan.name}
             </h2>
           </div>
-          <ChartLegend />
+          <div className="chart-heading-controls">
+            <label className="chart-month-jump">
+              <span className="field-label">JUMP TO MONTH</span>
+              <select
+                aria-label="Select a month to inspect (keyboard-accessible alternative to clicking the chart)"
+                value={selectedMonth ?? ''}
+                onChange={(e) =>
+                  setSelectedMonth(
+                    e.target.value === '' ? null : Number(e.target.value),
+                  )
+                }
+              >
+                <option value="">Choose a month…</option>
+                {MONTHS.map((m, i) => (
+                  <option key={m} value={i}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <ChartLegend />
+          </div>
         </div>
         <div className="chart-wrap">
           <ResponsiveContainer width="100%" height={430}>
@@ -784,6 +850,11 @@ function Dashboard({
           </ResponsiveContainer>
         </div>
       </section>
+      <MonthlyCompositionChart
+        result={result}
+        selectedMonth={selectedMonth}
+        setSelectedMonth={setSelectedMonth}
+      />
       {selectedMonth !== null && (
         <MonthDetail
           index={selectedMonth}
@@ -849,6 +920,79 @@ function Dashboard({
         </section>
       </div>
     </>
+  );
+}
+function MonthlyCompositionChart({
+  result,
+  selectedMonth,
+  setSelectedMonth,
+}: {
+  result: ReturnType<typeof analyze>;
+  selectedMonth: number | null;
+  setSelectedMonth: (v: number | null) => void;
+}) {
+  const { rows, series } = useMemo(() => monthlyComposition(result), [result]);
+  const colors = ['#0068cc', '#8e2da8', '#009500', '#b8740b', '#c9c7c2'];
+  return (
+    <section className="chart-card composition-card">
+      <div className="card-heading">
+        <div>
+          <span>MONTHLY COMPOSITION OF DEMAND</span>
+          <h2>Which projects make up each month&apos;s total</h2>
+        </div>
+        <div className="composition-legend">
+          {series.map((name, i) => (
+            <span key={name} className="composition-legend-item">
+              <i style={{ background: colors[i % colors.length] }} />
+              {name}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="chart-wrap">
+        <ResponsiveContainer width="100%" height={260}>
+          <ComposedChart
+            data={rows}
+            margin={{ top: 10, right: 24, left: 10, bottom: 48 }}
+            onClick={(state) => {
+              if (state?.activeTooltipIndex != null)
+                setSelectedMonth(Number(state.activeTooltipIndex));
+            }}
+          >
+            <CartesianGrid stroke="#efeeec" vertical={false} />
+            <XAxis
+              dataKey="month"
+              interval={0}
+              angle={-45}
+              textAnchor="end"
+              tick={{ fontSize: 9 }}
+            />
+            <YAxis tick={{ fontSize: 11 }} />
+            <Tooltip />
+            {selectedMonth !== null && (
+              <ReferenceLine
+                x={MONTHS[selectedMonth]}
+                stroke="#161514"
+                strokeDasharray="3 3"
+              />
+            )}
+            {series.map((name, i) => (
+              <Bar
+                key={name}
+                dataKey={name}
+                stackId="composition"
+                fill={colors[i % colors.length]}
+              />
+            ))}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <p className="info-note">
+        Click a month to open the same month detail used by the bottleneck chart
+        above. &quot;Other&quot; groups every contributor outside the largest
+        few so the legend stays readable.
+      </p>
+    </section>
   );
 }
 function ChartLegend() {
@@ -944,12 +1088,15 @@ function MonthDetail({
   return (
     <section className="month-detail">
       <header>
-        <h2>
-          {MONTHS[index]} —{' '}
-          {result.gap[index] > 0.05
-            ? `unresolved gap of ${display(result.gap[index])}`
-            : 'covered by planned capacity'}
-        </h2>
+        <div>
+          <span>WHO IS ON SITE IN {MONTHS[index].toUpperCase()}?</span>
+          <h2>
+            {MONTHS[index]} —{' '}
+            {result.gap[index] > 0.05
+              ? `unresolved gap of ${display(result.gap[index])}`
+              : 'covered by planned capacity'}
+          </h2>
+        </div>
         <button onClick={close}>
           <X size={16} /> Close
         </button>
@@ -1144,6 +1291,7 @@ function Projects({
               <th>PROJECT</th>
               <th>TYPE</th>
               <th>VALUE</th>
+              <th>COMPLETION</th>
               <th>PLANNING PROBABILITY</th>
               <th>SOURCE</th>
               <th>EXPECTED START</th>
@@ -1182,6 +1330,18 @@ function Projects({
                   </td>
                   <td>{p.type}</td>
                   <td className="num">${p.value.toFixed(1)}M</td>
+                  <td>
+                    {p.percentComplete !== undefined ? (
+                      <div className="completion">
+                        <b>
+                          <i style={{ width: `${p.percentComplete}%` }} />
+                        </b>
+                        <span>{p.percentComplete}%</span>
+                      </div>
+                    ) : (
+                      <span className="muted">Not started</span>
+                    )}
+                  </td>
                   <td>
                     {p.type === 'Hard' ? (
                       <b>100% — awarded</b>
@@ -1236,6 +1396,7 @@ function Projects({
                   <td>
                     <div className="stepper">
                       <button
+                        aria-label={`Shift ${p.name} start one month earlier`}
                         onClick={() =>
                           mutate((c) => {
                             c.shifts[p.id] = (c.shifts[p.id] || 0) - 1;
@@ -1252,6 +1413,7 @@ function Projects({
                         }
                       </span>
                       <button
+                        aria-label={`Shift ${p.name} start one month later`}
                         onClick={() =>
                           mutate((c) => {
                             c.shifts[p.id] = (c.shifts[p.id] || 0) + 1;
@@ -1310,6 +1472,9 @@ function Projects({
               </td>
               <td>Proposed</td>
               <td>${config.proposed.value.toFixed(1)}M</td>
+              <td>
+                <span className="muted">Not started</span>
+              </td>
               <td>100% when included</td>
               <td>Scenario only</td>
               <td>{MONTHS[config.proposed.startIndex]}</td>
@@ -1346,6 +1511,119 @@ function CheckButton({
   );
 }
 
+function PeopleViewSection({ project }: { project: Project }) {
+  const people = peopleMetricsForProject(project);
+  const freshness = forecastFreshness(project.lastRevisionDate, TODAY);
+  const flags = assumptionFlagsForProject(project, TODAY);
+  const workweek = project.workweekHours ?? 40;
+  const mapped = project.sourceLaborLabels?.map((label) => ({
+    label,
+    category: LABOR_SOURCE_MAP[label],
+  }));
+  return (
+    <section className="people-view">
+      <h3>People view — three distinct metrics</h3>
+      <div className="people-metrics">
+        <Metric
+          label="PEAK CREW"
+          value={people.peakCrew.toFixed(1)}
+          detail={`Highest concurrent requirement \u00b7 ${people.peakCrewMonth}`}
+          tone={people.basis === 'weekly-peak' ? 'success' : ''}
+        />
+        <Metric
+          label="AVERAGE / IMPLIED PEOPLE"
+          value={people.averageImpliedPeople.toFixed(1)}
+          detail={`Hours spread evenly across the schedule at a ${workweek}-hour workweek`}
+        />
+        <Metric
+          label="MONTHLY PLANNED PEOPLE"
+          value={
+            people.monthlyPlannedPeople !== undefined
+              ? people.monthlyPlannedPeople.toFixed(1)
+              : 'Not available'
+          }
+          detail={
+            people.basis === 'even-spread-estimate'
+              ? 'No time-phased staffing plan on file \u2014 see flags below'
+              : "From this project's own time-phased forecast"
+          }
+        />
+      </div>
+      <p className="info-note">
+        {people.basis === 'weekly-peak'
+          ? 'Peak crew is a measured weekly count for this project \u2014 the department bottleneck view can rely on it directly.'
+          : people.basis === 'even-spread-estimate'
+            ? 'No weekly staffing histogram is on file for this project. Peak crew is estimated from monthly-resolution data and may understate a short, sharp staffing peak.'
+            : "Peak crew comes from this project's own monthly time-phased forecast, not a weekly histogram."}
+      </p>
+      <div className="fact-grid">
+        <Metric
+          label="WORKWEEK ASSUMPTION"
+          value={`${workweek} hrs/week`}
+          detail="A longer workweek implies fewer people for the same hours, not more capacity"
+        />
+        <Metric
+          label="FORECAST FRESHNESS"
+          value={freshness}
+          tone={
+            freshness === 'Current'
+              ? 'success'
+              : freshness === 'Stale'
+                ? 'danger'
+                : 'warning'
+          }
+          detail={
+            project.lastRevisionDate
+              ? `Last revised ${project.lastRevisionDate}`
+              : 'No revision date on file'
+          }
+        />
+      </div>
+      {mapped && mapped.length > 0 && (
+        <div className="labor-mapping">
+          <h4>Source labor labels \u2192 standardized category</h4>
+          {mapped.map(({ label, category }) => (
+            <div className="detail-row" key={label}>
+              <span>{label}</span>
+              <b className={category ? '' : 'warning'}>
+                {category ?? 'UNMAPPED \u2014 needs review'}
+              </b>
+            </div>
+          ))}
+        </div>
+      )}
+      {flags.length > 0 && (
+        <div className="assumption-flags">
+          <h4>Data-quality &amp; assumption flags</h4>
+          {flags.map((flag) => (
+            <AssumptionFlagRow key={flag.id} flag={flag} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AssumptionFlagRow({ flag }: { flag: AssumptionFlag }) {
+  return (
+    <details className={`flag-row flag-${flag.severity}`}>
+      <summary>
+        <b className="flag-severity">{flag.severity}</b>
+        {flag.summary}
+      </summary>
+      <p>{flag.detail}</p>
+      <p>
+        <strong>Effect: </strong>
+        {flag.effect}
+      </p>
+      <p>
+        <strong>Recommended action: </strong>
+        {flag.recommendation}
+      </p>
+    </details>
+  );
+}
+
 function ProjectDrawer({
   project,
   config,
@@ -1363,6 +1641,7 @@ function ProjectDrawer({
     project.type === 'Hard'
       ? 100
       : (config.probabilities[project.id] ?? project.planningProbability);
+  const dialogRef = useDialogA11y<HTMLElement>(close);
   return (
     <div
       className="overlay drawer-overlay"
@@ -1371,7 +1650,14 @@ function ProjectDrawer({
         if (e.target === e.currentTarget) close();
       }}
     >
-      <aside className="drawer">
+      <aside
+        className="drawer"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${project.name} project forecast`}
+        tabIndex={-1}
+      >
         <header>
           <span>PROJECT FORECAST · {project.type}</span>
           <h2>{project.name}</h2>
@@ -1405,6 +1691,7 @@ function ProjectDrawer({
               detail="Forecast health"
             />
           </div>
+          <PeopleViewSection project={project} />
           <div className="drawer-cols">
             <section>
               <h3>Contract cost mix</h3>
@@ -1436,9 +1723,10 @@ function ProjectDrawer({
               {project.workPackages.map((w) => (
                 <div className="package-line" key={w.id}>
                   <CheckButton
-                    checked={config.packageIncluded[w.id] ?? w.included}
+                    checked={config.packageIncluded?.[w.id] ?? w.included}
                     onClick={() =>
                       mutate((c) => {
+                        c.packageIncluded ??= {};
                         c.packageIncluded[w.id] = !(
                           c.packageIncluded[w.id] ?? w.included
                         );
@@ -2110,18 +2398,33 @@ function Plans({
                 >
                   Rename
                 </button>
-                <button onClick={() => status(p.id, 'Under Review')}>
-                  Submit for Review
-                </button>
-                <button onClick={() => status(p.id, 'Approved Operating Plan')}>
-                  Mark as Approved
-                </button>
-                <button onClick={() => status(p.id, 'Superseded')}>
-                  Supersede
-                </button>
-                <button onClick={() => status(p.id, 'Archived')}>
-                  <Archive size={13} /> Archive
-                </button>
+                {p.status === 'Draft' && (
+                  <button onClick={() => status(p.id, 'Under Review')}>
+                    Submit for Review
+                  </button>
+                )}
+                {p.status === 'Under Review' && (
+                  <button
+                    onClick={() => status(p.id, 'Approved Operating Plan')}
+                  >
+                    Mark as Approved
+                  </button>
+                )}
+                {p.status === 'Approved Operating Plan' && (
+                  <button onClick={() => status(p.id, 'Superseded')}>
+                    Supersede
+                  </button>
+                )}
+                {p.status !== 'Archived' && (
+                  <button onClick={() => status(p.id, 'Archived')}>
+                    <Archive size={13} /> Archive
+                  </button>
+                )}
+                {p.status === 'Archived' && (
+                  <button onClick={() => status(p.id, 'Draft')}>
+                    Reopen as Draft
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     setPlans((x) =>
@@ -2398,9 +2701,17 @@ function ProposedModal({
   const update = <K extends keyof typeof a>(key: K, value: (typeof a)[K]) =>
     setLive((c) => ({ ...c, proposed: { ...c.proposed, [key]: value } }));
   const analysis = metrics(result);
+  const dialogRef = useDialogA11y<HTMLElement>(() => close(true));
   return (
     <div className="overlay">
-      <section className="modal proposed-modal">
+      <section
+        className="modal proposed-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Proposed project — live execution impact"
+        tabIndex={-1}
+      >
         <header>
           <div>
             <span>PROPOSED PROJECT — LIVE EXECUTION IMPACT</span>
@@ -2886,9 +3197,17 @@ function ActionModal({
           ['mobilize', 'MOBILIZATION DAYS'],
         ]
   ) as [keyof NonNullable<CapacityAction['leadDays']>, string][];
+  const dialogRef = useDialogA11y<HTMLElement>(() => close(true));
   return (
     <div className="overlay">
-      <section className="modal action-modal">
+      <section
+        className="modal action-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Capacity action — live preview"
+        tabIndex={-1}
+      >
         <header>
           <div>
             <span>CAPACITY ACTION — LIVE PREVIEW</span>
@@ -3166,9 +3485,17 @@ function CompareModal({
   category: LaborCategory;
   close: () => void;
 }) {
+  const dialogRef = useDialogA11y<HTMLElement>(close);
   return (
     <div className="overlay">
-      <section className="modal compare-modal">
+      <section
+        className="modal compare-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Plan comparison — ${category}, Mechanical — Metro`}
+        tabIndex={-1}
+      >
         <header>
           <div>
             <span>PLAN COMPARISON — {category}, MECHANICAL — METRO</span>
@@ -3207,7 +3534,7 @@ function CompareModal({
                 <h3>{p.name}</h3>
                 {[
                   ['First bottleneck', m.firstMonth],
-                  ['Peak shortage', `${m.peak.toFixed(1)} FTE`],
+                  ['Peak shortage', `${m.peakVsExisting.toFixed(1)} FTE`],
                   ['Bottleneck person-months', m.personMonths.toFixed(1)],
                   ['Permanent hires', perm],
                   ['Subcontract person-months', sub],

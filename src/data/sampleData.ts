@@ -91,6 +91,35 @@ export const CATEGORY_FACTORS: Record<LaborCategory, number> = {
   'BIM/VDC Specialist': 0.1,
   'Project Coordinator': 0.08,
 };
+
+/**
+ * Reference mapping from a project-level source forecast's own labor
+ * labels (illustrative trade/role names, not any one project's real cost
+ * codes) to this planner's standardized LaborCategory list. `null` means
+ * intentionally unmapped: a label that does not cleanly correspond to a
+ * standardized category is flagged for review rather than silently folded
+ * into "Other" or a nearest guess.
+ */
+export const LABOR_SOURCE_MAP: Record<string, LaborCategory | null> = {
+  Plumbing: 'Plumber',
+  'Mechanical Piping': 'Pipefitter',
+  Heating: 'HVAC Mechanic',
+  Ductwork: 'Sheet-Metal Worker',
+  'Fitters/Welders': 'Welder',
+  Sheetmetal: 'Sheet-Metal Worker',
+  Expeditors: 'Project Coordinator',
+  'Equipment Labor': 'Foreman',
+  'Excavation Labor': null,
+  'Material Handling': null,
+  Laydown: null,
+  'Spotters/Fire Watch': null,
+  'Mobilization/Demobilization': 'Foreman',
+  Safety: 'Superintendent',
+  'Quality Control': 'Project Engineer',
+  'Project Management': 'Project Manager',
+  'Administrative Team': null,
+  'Miscellaneous Labor': null,
+};
 const zeros = () => Array(18).fill(0) as number[];
 const pad = (start: number, values: number[]) => {
   const result = zeros();
@@ -126,6 +155,10 @@ const splitPackage = (
 const baseProjects: Project[] = [
   {
     id: 'p1',
+    percentComplete: 42,
+    sourceLaborLabels: ['Plumbing', 'Mechanical Piping'],
+    weeklyCrew: [5, 5, 9, 5],
+    lastRevisionDate: '2026-08-30',
     name: 'Metro Medical Tower — Plumbing',
     department: DEPARTMENTS[0],
     type: 'Hard',
@@ -152,6 +185,10 @@ const baseProjects: Project[] = [
   },
   {
     id: 'p2',
+    percentComplete: 28,
+    sourceLaborLabels: ['Plumbing', 'Mechanical Piping', 'Fitters/Welders'],
+    workweekHours: 50,
+    lastRevisionDate: '2026-07-20',
     name: 'Northline Manufacturing Expansion',
     department: DEPARTMENTS[0],
     type: 'Hard',
@@ -168,6 +205,13 @@ const baseProjects: Project[] = [
   },
   {
     id: 'p3',
+    percentComplete: 15,
+    sourceLaborLabels: [
+      'Mechanical Piping',
+      'Fitters/Welders',
+      'Quality Control',
+    ],
+    lastRevisionDate: '2026-06-15',
     name: 'Summit Data Hall A',
     department: DEPARTMENTS[0],
     type: 'Hard',
@@ -189,6 +233,8 @@ const baseProjects: Project[] = [
   },
   {
     id: 'p4',
+    percentComplete: 8,
+    sourceLaborLabels: ['Mechanical Piping', 'Excavation Labor'],
     name: 'Civic Arena Renovation',
     department: DEPARTMENTS[0],
     type: 'Hard',
@@ -209,6 +255,14 @@ const residual = hardTotal.map((v, i) =>
 );
 baseProjects.push({
   id: 'p5',
+  percentComplete: 5,
+  sourceLaborLabels: [
+    'Mechanical Piping',
+    'Fitters/Welders',
+    'Miscellaneous Labor',
+  ],
+  workweekHours: 60,
+  lastRevisionDate: '2026-08-15',
   name: 'Riverside Central Plant',
   department: DEPARTMENTS[0],
   type: 'Hard',
