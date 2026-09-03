@@ -19,6 +19,90 @@ const defaultWpValues: Record<string, number> = {
   'atlas-w3': 20,
 };
 
+// Nearest-neighbour resample of a reference shape to n slots, per
+// CALCULATIONS.md §2.
+export function resample(reference: number[], n: number): number[] {
+  if (n <= 0) return [];
+  if (!reference.length) return zeros().slice(0, n).fill(0);
+  if (reference.length === n) return [...reference];
+  return Array.from({ length: n }, (_, i) => {
+    const idx = Math.min(
+      reference.length - 1,
+      Math.round((i / Math.max(1, n - 1)) * (reference.length - 1)),
+    );
+    return reference[idx];
+  });
+}
+
+// 0-28% ramp up, 28-62% plateau at 1, then taper to 0, per CALCULATIONS.md §2.
+export function ramp(n: number): number[] {
+  const rampEnd = Math.round(n * 0.28);
+  const plateauEnd = Math.max(rampEnd, Math.round(n * 0.62));
+  return Array.from({ length: n }, (_, i) => {
+    if (i < rampEnd) return (i + 1) / (rampEnd + 1);
+    if (i < plateauEnd) return 1;
+    const tail = n - plateauEnd;
+    return tail > 0 ? Math.max(0, 1 - (i - plateauEnd + 1) / (tail + 1)) : 0;
+  });
+}
+
+const COMPARABLE_PROJECT_SHAPE = [
+  0.2, 0.4, 0.6, 0.8, 1, 1, 0.8, 0.5, 0.2, 0, 0, 0,
+];
+
+// A normalized (peak ~1) shape of length n for a staffing-curve choice.
+export function shapeFor(
+  curve: WorkPackage['staffingCurve'],
+  n: number,
+  manual?: number[],
+): number[] {
+  if (curve === 'Manual monthly forecast')
+    return manual?.length ? resample(manual, n) : Array(n).fill(1);
+  if (curve === 'Even distribution') return Array(n).fill(0.6);
+  if (curve === 'Standard ramp / peak / taper') return ramp(n);
+  return resample(COMPARABLE_PROJECT_SHAPE, n);
+}
+
+// The work package's authored shape, isolated from its 18-slot padding, as
+// it existed at the plan's baseline (before any scenario edits).
+function baselineShape(w: WorkPackage): number[] {
+  const len = w.baselineDurationMonths ?? w.durationMonths;
+  return w.curve.slice(w.startIndex, w.startIndex + len);
+}
+
+// Resolve a work package's live 18-slot curve. When neither its duration
+// nor its staffing-curve selection has moved from the plan's baseline, this
+// returns the exact authored curve unchanged — so editing unrelated fields
+// (value, cost mix, probability, self-perform %) never perturbs the shape,
+// and the specified baseline numbers stay exact. Changing duration alone
+// stretches/compresses the authored shape; changing the staffing-curve
+// selection switches to the matching generic template, rescaled to the
+// package's baseline peak, then placed at its (possibly shifted) start.
+export function resolveWorkPackageCurve(w: WorkPackage): number[] {
+  const n = Math.max(1, Math.round(w.durationMonths));
+  const curveUnchanged =
+    (w.baselineStaffingCurve ?? w.staffingCurve) === w.staffingCurve;
+  const durationUnchanged =
+    (w.baselineDurationMonths ?? w.durationMonths) === w.durationMonths;
+  let shape: number[];
+  if (curveUnchanged && durationUnchanged) return [...w.curve];
+  if (curveUnchanged) {
+    shape = resample(baselineShape(w), n);
+  } else {
+    const peak = Math.max(0, ...baselineShape(w));
+    const template = shapeFor(w.staffingCurve, n, w.manualMonthly);
+    const templatePeak = Math.max(0, ...template) || 1;
+    shape = template.map((v) => (v / templatePeak) * peak);
+  }
+  const out = zeros();
+  const placeAt = w.startIndex + w.scenarioShift;
+  shape.forEach((v, k) => {
+    const i = placeAt + k;
+    if (i >= 0 && i < N) out[i] = v;
+  });
+  return out;
+}
+
 export function rollupProjectCurve(
   project: Project,
   overrides?: Record<string, boolean>,
@@ -50,8 +134,9 @@ export function proposedCurve(
         w.valuePercent / (defaultWpValues[w.id] || w.valuePercent || 1);
       const selfScale =
         w.selfPerformPercent / (w.baselineSelfPerformPercent || 100);
-      w.curve.forEach((v, i) => {
-        const target = i + w.scenarioShift + (a.startIndex - 7);
+      resolveWorkPackageCurve(w).forEach((v, i) => {
+        if (!v) return;
+        const target = i + (a.startIndex - 7);
         if (target >= 0 && target < N)
           out[target] +=
             v *
@@ -241,6 +326,11 @@ export function metrics(r: AnalysisResult) {
     existingAtPeakVsExisting: r.existing[peakVsExistingIndex],
     subcontractPersonMonths: r.subcontract.reduce((s, v) => s + v, 0),
     temporaryCapacityPeak: Math.max(...r.subcontract),
+    overtimePeak: Math.max(...r.overtime),
+    addedCapacityFteMonths:
+      r.confirmedHires.reduce((s, v) => s + v, 0) +
+      r.plannedHires.reduce((s, v) => s + v, 0) +
+      r.subcontract.reduce((s, v) => s + v, 0),
     unconfirmedPeak: Math.max(...r.unconfirmed),
     confidence:
       peak > 0.05
@@ -283,6 +373,110 @@ export function actionStartDate(action: CapacityAction) {
         ? lead.source + lead.vet + lead.mobilize
         : 0;
   return subtractDays(monthStart(action.fromIndex), days);
+}
+export function addDays(date: Date, days: number) {
+  const result = new Date(date);
+  result.setUTCDate(result.getUTCDate() + days);
+  return result;
+}
+// Fractional month index of a date on the same continuous Sep-2026-based
+// scale as monthIndex(), for positioning milestones between whole months.
+export function datePosition(date: Date): number {
+  for (let i = -12; i < 30; i++) {
+    const start = monthStart(i).getTime();
+    const end = monthStart(i + 1).getTime();
+    if (date.getTime() >= start && date.getTime() < end) {
+      return i + (date.getTime() - start) / (end - start);
+    }
+  }
+  return date.getTime() < monthStart(-12).getTime() ? -12 : 30;
+}
+export interface ActionPhase {
+  label: string;
+  start: Date;
+  end: Date;
+}
+export interface ActionTimeline {
+  phases: ActionPhase[];
+  milestones: Array<{ label: string; date: Date; final?: boolean }>;
+  productiveStart: Date;
+  productiveEnd: Date | null; // null = open-ended (runs to the end of the window)
+}
+// The full backward-calculated phase/milestone breakdown for a hire or
+// subcontract action, per CALCULATIONS.md §5. Returns null for action kinds
+// with no lead-time structure (overtime, leave, attrition).
+export function actionMilestones(
+  action: CapacityAction,
+): ActionTimeline | null {
+  const lead = action.leadDays;
+  if (!lead) return null;
+  const productiveStart = monthStart(action.fromIndex);
+  if (action.kind === 'hire') {
+    const recruitingStart = subtractDays(
+      productiveStart,
+      lead.recruit + lead.interview + lead.offer + lead.onboard + lead.ramp,
+    );
+    const interviewsStart = addDays(recruitingStart, lead.recruit);
+    const offerAccepted = addDays(interviewsStart, lead.interview);
+    const hireStarts = addDays(offerAccepted, lead.offer);
+    const onboardingEnds = addDays(hireStarts, lead.onboard);
+    return {
+      phases: [
+        { label: 'Recruiting', start: recruitingStart, end: interviewsStart },
+        {
+          label: 'Interviewing and selection',
+          start: interviewsStart,
+          end: offerAccepted,
+        },
+        { label: 'Offer / notice', start: offerAccepted, end: hireStarts },
+        { label: 'Onboarding', start: hireStarts, end: onboardingEnds },
+        { label: 'Ramp-up', start: onboardingEnds, end: productiveStart },
+      ],
+      milestones: [
+        { label: 'Begin recruiting', date: recruitingStart },
+        { label: 'Offer accepted', date: offerAccepted },
+        { label: 'Hire starts', date: hireStarts },
+        { label: 'Fully productive', date: productiveStart, final: true },
+      ],
+      productiveStart,
+      productiveEnd: null,
+    };
+  }
+  if (action.kind === 'subcontract') {
+    const sourcingStart = subtractDays(
+      productiveStart,
+      lead.source + lead.vet + lead.mobilize,
+    );
+    const sourcingComplete = addDays(sourcingStart, lead.source);
+    const contractExecuted = addDays(sourcingComplete, lead.vet);
+    return {
+      phases: [
+        { label: 'Sourcing', start: sourcingStart, end: sourcingComplete },
+        {
+          label: 'Vetting and contracting',
+          start: sourcingComplete,
+          end: contractExecuted,
+        },
+        {
+          label: 'Mobilization',
+          start: contractExecuted,
+          end: productiveStart,
+        },
+      ],
+      milestones: [
+        { label: 'Begin subcontract sourcing', date: sourcingStart },
+        { label: 'Subcontract executed', date: contractExecuted },
+        {
+          label: 'Mobilized and productive',
+          date: productiveStart,
+          final: true,
+        },
+      ],
+      productiveStart,
+      productiveEnd: monthStart(action.toIndex + 1),
+    };
+  }
+  return null;
 }
 export const formatDate = (date: Date) =>
   date.toLocaleDateString('en-US', {

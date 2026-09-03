@@ -49,6 +49,9 @@ export interface WorkPackage {
   confidence: number;
   scenarioShift: number;
   baselineSelfPerformPercent?: number;
+  baselineStaffingCurve?: StaffingCurve;
+  baselineDurationMonths?: number;
+  manualMonthly?: number[];
 }
 export interface Project {
   id: string;
@@ -118,6 +121,9 @@ export interface CapacityAction {
   confirmed: boolean;
   notes: string;
   sourceType?: 'External' | 'Another Department' | 'Undetermined';
+  hourlyRate?: number;
+  cost?: number;
+  costBasis?: 'per hour' | 'per month';
   leadDays?: {
     recruit: number;
     interview: number;

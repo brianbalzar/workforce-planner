@@ -364,6 +364,8 @@ export const ATLAS: ProposedProject = {
       confidence: 85,
       scenarioShift: 0,
       baselineSelfPerformPercent: 100,
+      baselineStaffingCurve: 'Comparable-project curve',
+      baselineDurationMonths: 4,
     },
     {
       id: 'atlas-w2',
@@ -386,6 +388,8 @@ export const ATLAS: ProposedProject = {
       confidence: 75,
       scenarioShift: 0,
       baselineSelfPerformPercent: 90,
+      baselineStaffingCurve: 'Standard ramp / peak / taper',
+      baselineDurationMonths: 8,
     },
     {
       id: 'atlas-w3',
@@ -408,6 +412,8 @@ export const ATLAS: ProposedProject = {
       confidence: 70,
       scenarioShift: 0,
       baselineSelfPerformPercent: 100,
+      baselineStaffingCurve: 'Comparable-project curve',
+      baselineDurationMonths: 4,
     },
   ],
 };
@@ -479,6 +485,7 @@ export const ACTIONS: CapacityAction[] = [
     status: 'Offer Accepted',
     confirmed: true,
     notes: 'Backfill plus Metro Medical Tower ramp.',
+    hourlyRate: 92,
     leadDays: lead,
   },
   {
@@ -491,6 +498,7 @@ export const ACTIONS: CapacityAction[] = [
     status: 'Approved to Recruit',
     confirmed: false,
     notes: 'Sized against the Atlas package peak.',
+    hourlyRate: 92,
     leadDays: lead,
   },
   {
@@ -504,6 +512,8 @@ export const ACTIONS: CapacityAction[] = [
     confirmed: false,
     notes: 'Bridge to the March hire class.',
     sourceType: 'External',
+    cost: 145,
+    costBasis: 'per hour',
     leadDays: lead,
   },
   {
@@ -517,6 +527,8 @@ export const ACTIONS: CapacityAction[] = [
     confirmed: false,
     notes: 'Covers the Atlas peak window.',
     sourceType: 'External',
+    cost: 150,
+    costBasis: 'per hour',
     leadDays: { ...lead, source: 60, vet: 30 },
   },
   {

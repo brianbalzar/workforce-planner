@@ -20,6 +20,7 @@ import {
   Line,
   ReferenceLine,
   ResponsiveContainer,
+  Text,
   Tooltip,
   XAxis,
   YAxis,
@@ -36,13 +37,16 @@ import type {
   PlanStatus,
   Project,
   ScenarioConfig,
+  StaffingCurve,
   Unit,
   WorkforcePlan,
   WorkPackage,
 } from '../domain/types';
 import {
+  actionMilestones,
   actionStartDate,
   analyze,
+  datePosition,
   formatDate,
   formatValue,
   metrics,
@@ -184,6 +188,9 @@ export function App() {
       confirmed: false,
       notes: 'Added in scenario preview.',
       sourceType: 'External',
+      hourlyRate: assumptions.hourlyRate,
+      cost: Math.round(assumptions.hourlyRate * 1.55),
+      costBasis: 'per hour',
       leadDays: {
         recruit: assumptions.recruitDays,
         interview: assumptions.interviewDays,
@@ -693,7 +700,19 @@ function Dashboard({
                 interval={0}
                 angle={-45}
                 textAnchor="end"
-                tick={{ fontSize: 10, fill: '#6e6c68' }}
+                tick={(props) => {
+                  const constrained = result.gap[props.index] > 0.05;
+                  return (
+                    <Text
+                      {...props}
+                      fontSize={10}
+                      fontWeight={constrained ? 700 : 400}
+                      fill={constrained ? '#b91d1d' : '#6e6c68'}
+                    >
+                      {props.payload.value}
+                    </Text>
+                  );
+                }}
               />
               <YAxis
                 tick={{ fontSize: 11 }}
@@ -705,7 +724,9 @@ function Dashboard({
                       : v
                 }
               />
-              <Tooltip content={<PlannerTooltip unit={unit} />} />
+              <Tooltip
+                content={<PlannerTooltip result={result} display={display} />}
+              />
               <ReferenceLine
                 x="Sep 2026"
                 stroke="#161514"
@@ -832,42 +853,70 @@ function Dashboard({
 function ChartLegend() {
   return (
     <div className="legend">
-      <span className="hard">Hard backlog</span>
-      <span className="expected">Expected workload</span>
-      <span className="scenario">Scenario workload</span>
-      <span className="capacity">Capacity layers</span>
-      <span className="gap">Unresolved gap</span>
+      <div className="legend-lines">
+        <span className="line-hard">Hard backlog</span>
+        <span className="line-expected">Expected workload</span>
+        <span className="line-scenario">Scenario workload</span>
+      </div>
+      <div className="legend-capacity">
+        <span className="sw-existing">Existing</span>
+        <span className="sw-confirmed">Confirmed hires</span>
+        <span className="sw-planned">Planned / unconfirmed</span>
+        <span className="sw-subcontract">Subcontract</span>
+        <span className="sw-overtime">Overtime</span>
+        <span className="sw-gap">Unresolved gap</span>
+      </div>
     </div>
   );
 }
 function PlannerTooltip({
   active,
-  payload,
   label,
-  unit,
+  result,
+  display,
 }: {
   active?: boolean;
-  payload?: Array<{ name: string; value: number; color: string }>;
   label?: string;
-  unit: Unit;
+  result: ReturnType<typeof analyze>;
+  display: (v: number) => string;
 }) {
-  if (!active || !payload) return null;
+  const i = label ? MONTHS.indexOf(label) : -1;
+  if (!active || i < 0) return null;
+  const rows: Array<[string, number, string, boolean?]> = [
+    ['Hard backlog', result.hard[i], '#000'],
+    ['Expected workload', result.expected[i], '#0068cc'],
+    ['Proposed contribution', result.proposed[i], '#8e2da8'],
+    ['Scenario workload', result.scenario[i], '#8e2da8', true],
+    ['Existing capacity', result.existing[i], '#8ac3ff'],
+    ['Confirmed additions', result.confirmedHires[i], '#009500'],
+    ['Planned / unconfirmed', result.unconfirmed[i], '#b8740b'],
+  ];
+  const gap = result.gap[i];
   return (
     <div className="chart-tooltip">
       <strong>{label}</strong>
-      {payload.map((x) => (
-        <div key={x.name}>
-          <span>{x.name}</span>
-          <b style={{ color: x.color }}>
-            {unit === 'People'
-              ? x.value.toFixed(1)
-              : unit === 'Hours'
-                ? Math.round(x.value).toLocaleString()
-                : `$${Math.round(x.value).toLocaleString()}`}
-          </b>
+      {rows.map(([name, value, color, bold]) => (
+        <div key={name} className={bold ? 'bold' : ''}>
+          <span>{name}</span>
+          <b style={{ color }}>{display(value)}</b>
         </div>
       ))}
-      <small>Click the month for project detail</small>
+      <div className="bold">
+        <span>Remaining gap</span>
+        <b className={gap > 0.05 ? 'red' : 'green'}>{display(gap)}</b>
+      </div>
+      {result.drivers[i].length > 0 && (
+        <>
+          <small className="tooltip-heading">PROJECTS DRIVING DEMAND</small>
+          {result.drivers[i].slice(0, 4).map((d) => (
+            <div key={d.name}>
+              <span>{d.name}</span>
+              <b>{display(d.fte)}</b>
+            </div>
+          ))}
+        </>
+      )}
+      <small>Click the month for full detail</small>
     </div>
   );
 }
@@ -938,6 +987,8 @@ function MonthDetail({
   );
 }
 function Timeline({ actions }: { actions: CapacityAction[] }) {
+  const pct = (d: Date) =>
+    Math.min(100, Math.max(0, (datePosition(d) / 18) * 100));
   return (
     <section className="timeline-card">
       <div className="card-heading">
@@ -953,20 +1004,40 @@ function Timeline({ actions }: { actions: CapacityAction[] }) {
         ))}
       </div>
       {actions.map((action) => {
-        const start = Math.max(
-          0,
-          action.fromIndex -
-            (action.kind === 'hire'
-              ? 4
-              : action.kind === 'subcontract'
-                ? 5
-                : 0),
-        );
-        const width = Math.max(
-          1,
-          (action.kind === 'hire' ? 18 : action.toIndex + 1) - start,
-        );
+        const timeline = actionMilestones(action);
         const overdue = !action.confirmed && actionStartDate(action) < TODAY;
+        if (!timeline) {
+          const start = Math.max(0, action.fromIndex);
+          const width = Math.max(1, action.toIndex + 1 - start);
+          return (
+            <div className="timeline-row" key={action.id}>
+              <div>
+                <strong>
+                  {action.quantity} {action.category}
+                </strong>
+                <small>
+                  {action.kind} · {action.status}
+                </small>
+              </div>
+              <div className="timeline-grid">
+                {MONTHS.map((_, i) => (
+                  <i key={i} />
+                ))}
+                <span
+                  className={`timeline-bar ${action.kind}`}
+                  style={{
+                    gridColumn: `${start + 1} / span ${Math.min(width, 18 - start)}`,
+                  }}
+                >
+                  Active period
+                </span>
+              </div>
+            </div>
+          );
+        }
+        const productiveEndPct = timeline.productiveEnd
+          ? pct(timeline.productiveEnd)
+          : 100;
         return (
           <div className="timeline-row" key={action.id}>
             <div>
@@ -981,19 +1052,42 @@ function Timeline({ actions }: { actions: CapacityAction[] }) {
               {MONTHS.map((_, i) => (
                 <i key={i} />
               ))}
+              {overdue && (
+                <span className="timeline-overdue-label">
+                  OVERDUE · WAS DUE {formatDate(actionStartDate(action))}
+                </span>
+              )}
+              {timeline.phases.map((phase, i) => {
+                const left = pct(phase.start);
+                const right = pct(phase.end);
+                return (
+                  <span
+                    key={phase.label}
+                    className={`phase phase-${i} ${action.kind === 'subcontract' ? 'subcontract' : ''}`}
+                    style={{
+                      left: `${left}%`,
+                      width: `${Math.max(right - left, 0.3)}%`,
+                    }}
+                    title={`${phase.label}: ${formatDate(phase.start)} – ${formatDate(phase.end)}`}
+                  />
+                );
+              })}
               <span
-                className={`timeline-bar ${action.kind} ${overdue ? 'overdue' : ''}`}
+                className={`productive-segment ${action.confirmed ? '' : 'planned'}`}
                 style={{
-                  gridColumn: `${start + 1} / span ${Math.min(width, 18 - start)}`,
+                  left: `${pct(timeline.productiveStart)}%`,
+                  width: `${Math.max(productiveEndPct - pct(timeline.productiveStart), 0.3)}%`,
                 }}
-              >
-                {overdue ? 'OVERDUE · ' : ''}
-                {action.kind === 'hire'
-                  ? 'Recruit → onboard → productive'
-                  : action.kind === 'subcontract'
-                    ? 'Source → vet → mobilize'
-                    : 'Active period'}
-              </span>
+                title="Productive"
+              />
+              {timeline.milestones.map((ms) => (
+                <span
+                  key={ms.label}
+                  className={`milestone ${ms.date < TODAY && !action.confirmed && !ms.final ? 'overdue' : ''} ${ms.final ? 'final' : ''}`}
+                  style={{ left: `${pct(ms.date)}%` }}
+                  title={`${ms.label}: ${formatDate(ms.date)}`}
+                />
+              ))}
             </div>
           </div>
         );
@@ -2027,6 +2121,20 @@ function Plans({
                 <button onClick={() => status(p.id, 'Archived')}>
                   <Archive size={13} /> Archive
                 </button>
+                <button
+                  onClick={() => {
+                    setPlans((x) =>
+                      x.map((y) =>
+                        y.id === p.id ? { ...y, stale: false } : y,
+                      ),
+                    );
+                    setToast(
+                      `Rebased "${p.name}" against the Sep 1, 2026 source refresh. Capacity action statuses were preserved.`,
+                    );
+                  }}
+                >
+                  Rebase
+                </button>
               </div>
               {p.stale && (
                 <div className="stale">
@@ -2056,9 +2164,30 @@ function Plans({
                   detail="Person-months"
                 />
                 <Metric
-                  label="UNCONFIRMED"
-                  value={`${m.unconfirmedPeak.toFixed(1)} FTE`}
-                  detail="At peak"
+                  label="NEXT ACTION"
+                  value={(() => {
+                    const deadlines = p.config.actions
+                      .filter(
+                        (a) =>
+                          ['hire', 'subcontract'].includes(a.kind) &&
+                          !a.confirmed,
+                      )
+                      .map((a) => actionStartDate(a))
+                      .sort((a, b) => +a - +b);
+                    const next = deadlines.find((d) => d >= TODAY);
+                    return next ? formatDate(next) : 'None';
+                  })()}
+                  detail={(() => {
+                    const overdue = p.config.actions
+                      .filter(
+                        (a) =>
+                          ['hire', 'subcontract'].includes(a.kind) &&
+                          !a.confirmed,
+                      )
+                      .map((a) => actionStartDate(a))
+                      .filter((d) => d < TODAY).length;
+                    return `${overdue} overdue`;
+                  })()}
                 />
                 <Metric
                   label="CONFIDENCE"
@@ -2659,7 +2788,72 @@ function WorkPackageEditor({
             }
           />
         </Field>
+        <Field label="DURATION (MONTHS)">
+          <input
+            type="number"
+            min="1"
+            max="18"
+            value={item.durationMonths}
+            onChange={(e) =>
+              update({
+                ...item,
+                durationMonths: Math.max(1, Math.round(+e.target.value)),
+              })
+            }
+          />
+        </Field>
+        <Field label="STAFFING CURVE">
+          <select
+            value={item.staffingCurve}
+            onChange={(e) =>
+              update({
+                ...item,
+                staffingCurve: e.target.value as StaffingCurve,
+              })
+            }
+          >
+            <option>Comparable-project curve</option>
+            <option>Standard ramp / peak / taper</option>
+            <option>Even distribution</option>
+            <option>Manual monthly forecast</option>
+          </select>
+        </Field>
       </div>
+      {item.staffingCurve === 'Manual monthly forecast' && (
+        <div className="manual-forecast">
+          <small>
+            Manual monthly forecast — enter this package&apos;s own FTE for each
+            month of its {item.durationMonths}-month duration, starting{' '}
+            {MONTHS[Math.min(17, item.startIndex + item.scenarioShift)]}.
+          </small>
+          <div className="manual-forecast-grid">
+            {Array.from({ length: item.durationMonths }, (_, k) => {
+              const monthIndex = item.startIndex + item.scenarioShift + k;
+              const values = item.manualMonthly?.length
+                ? item.manualMonthly
+                : Array(item.durationMonths).fill(
+                    Math.max(0, ...item.curve) || 1,
+                  );
+              return (
+                <label key={k}>
+                  <span>{MONTHS[monthIndex] ?? `Month ${k + 1}`}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={values[k] ?? 0}
+                    onChange={(e) => {
+                      const next = [...values];
+                      next[k] = Math.max(0, +e.target.value);
+                      update({ ...item, manualMonthly: next });
+                    }}
+                  />
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </article>
   );
 }
@@ -2674,7 +2868,8 @@ function ActionModal({
   close: (discard: boolean) => void;
 }) {
   const date = actionStartDate(action),
-    overdue = !action.confirmed && date < TODAY;
+    overdue = !action.confirmed && date < TODAY,
+    timeline = actionMilestones(action);
   const leadFields = (
     action.kind === 'hire'
       ? [
@@ -2843,6 +3038,69 @@ function ActionModal({
                 ))}
               </div>
             )}
+            {action.kind === 'hire' && (
+              <div className="form-grid">
+                <Field label="LOADED HOURLY RATE">
+                  <input
+                    type="number"
+                    min="0"
+                    value={action.hourlyRate ?? 0}
+                    onChange={(e) =>
+                      update({
+                        ...action,
+                        hourlyRate: Math.max(0, +e.target.value),
+                      })
+                    }
+                  />
+                </Field>
+              </div>
+            )}
+            {action.kind === 'subcontract' && (
+              <div className="form-grid">
+                <Field label="COST">
+                  <input
+                    type="number"
+                    min="0"
+                    value={action.cost ?? 0}
+                    onChange={(e) =>
+                      update({ ...action, cost: Math.max(0, +e.target.value) })
+                    }
+                  />
+                </Field>
+                <Field label="COST BASIS">
+                  <select
+                    value={action.costBasis ?? 'per hour'}
+                    onChange={(e) =>
+                      update({
+                        ...action,
+                        costBasis: e.target.value as 'per hour' | 'per month',
+                      })
+                    }
+                  >
+                    <option value="per hour">Per hour</option>
+                    <option value="per month">Per month</option>
+                  </select>
+                </Field>
+                <Field label="SOURCE TYPE">
+                  <select
+                    value={action.sourceType ?? 'External'}
+                    onChange={(e) =>
+                      update({
+                        ...action,
+                        sourceType: e.target
+                          .value as CapacityAction['sourceType'],
+                      })
+                    }
+                  >
+                    <option value="External">External</option>
+                    <option value="Another Department">
+                      Another Department
+                    </option>
+                    <option value="Undetermined">Undetermined</option>
+                  </select>
+                </Field>
+              </div>
+            )}
             <Field label="NOTES">
               <textarea
                 value={action.notes}
@@ -2862,20 +3120,31 @@ function ActionModal({
               The date recalculates immediately from the required productive
               month and every lead-time assumption.
             </p>
+            {timeline && (
+              <ul className="milestone-list">
+                {timeline.milestones.map((ms) => {
+                  const past = ms.date < TODAY && !action.confirmed;
+                  return (
+                    <li key={ms.label} className={past ? 'red' : ''}>
+                      <span>{ms.label}</span>
+                      <b>{formatDate(ms.date)}</b>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
             {action.kind === 'hire' && (
-              <div className="ramp">
-                <strong>Productive ramp</strong>
-                <span>
-                  Month before productive <b>75%</b>
-                </span>
-                <span>
-                  Two months before <b>50%</b>
-                </span>
-                <small>
-                  Displayed for planning. Default sample capacity begins at the
-                  fully productive month.
-                </small>
-              </div>
+              <small className="rail-note">
+                Productive ramp: Month 1 50%, Month 2 75%, Month 3 onward 100%.
+                Displayed for planning — default sample capacity begins at the
+                fully productive month.
+              </small>
+            )}
+            {action.kind === 'subcontract' && (
+              <small className="rail-note">
+                Labor supplied by another internal department is modeled exactly
+                like subcontract capacity in this department&apos;s plan.
+              </small>
             )}
             <button className="primary" onClick={() => close(false)}>
               KEEP IN SCENARIO
@@ -2912,6 +3181,7 @@ function CompareModal({
           {plans.map((p) => {
             const r = analyze(p.config, category),
               m = metrics(r),
+              cap = p.config.capacity[category],
               perm = p.config.actions
                 .filter((a) => a.kind === 'hire')
                 .reduce((s, a) => s + a.quantity, 0),
@@ -2920,7 +3190,16 @@ function CompareModal({
                 .reduce(
                   (s, a) => s + a.quantity * (a.toIndex - a.fromIndex + 1),
                   0,
-                );
+                ),
+              deadlines = p.config.actions
+                .filter(
+                  (a) =>
+                    ['hire', 'subcontract'].includes(a.kind) && !a.confirmed,
+                )
+                .map((a) => actionStartDate(a))
+                .sort((a, b) => +a - +b),
+              overdueCount = deadlines.filter((d) => d < TODAY).length,
+              nextDate = deadlines.find((d) => d >= TODAY);
             return (
               <article key={p.id}>
                 <span>{p.status}</span>
@@ -2931,6 +3210,16 @@ function CompareModal({
                   ['Bottleneck person-months', m.personMonths.toFixed(1)],
                   ['Permanent hires', perm],
                   ['Subcontract person-months', sub],
+                  ['Overtime', `${m.overtimePeak.toFixed(1)} FTE peak`],
+                  [
+                    'Added labor cost (18 mo)',
+                    formatValue(
+                      m.addedCapacityFteMonths,
+                      'Labor Cost',
+                      cap.productiveHours,
+                      cap.hourlyRate,
+                    ),
+                  ],
                   [
                     'Proposed-project coverage',
                     p.config.proposedIncluded
@@ -2940,6 +3229,10 @@ function CompareModal({
                   [
                     'Unconfirmed capacity',
                     `${m.unconfirmedPeak.toFixed(1)} FTE at peak`,
+                  ],
+                  [
+                    'Action dates',
+                    `${overdueCount} overdue${nextDate ? ` · next ${formatDate(nextDate)}` : ''}`,
                   ],
                   [
                     'Remaining unresolved gap',

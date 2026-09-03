@@ -8,6 +8,7 @@ import {
   hireRampFactors,
   metrics,
   proposedCurve,
+  resolveWorkPackageCurve,
   rollupProjectCurve,
   validateWorkPackages,
 } from './engine';
@@ -62,6 +63,33 @@ describe('planning demand', () => {
     expect(Math.max(...proposedCurve(cfg, 'Plumber'))).toBeCloseTo(10, 1);
     cfg.proposed.laborAllocation.Plumber = 0;
     expect(proposedCurve(cfg, 'Plumber').every((v) => v === 0)).toBe(true);
+  });
+
+  it('leaves a work package curve exactly as authored when nothing changed', () => {
+    const w = ATLAS.workPackages[0];
+    expect(resolveWorkPackageCurve(w)).toEqual(w.curve);
+  });
+
+  it('stretches a work package curve live when only its duration changes', () => {
+    const cfg = growth();
+    const before = proposedCurve(cfg, 'Plumber');
+    cfg.proposed.workPackages[1].durationMonths = 16; // atlas-w2: 8 -> 16 months
+    const after = proposedCurve(cfg, 'Plumber');
+    expect(after).not.toEqual(before);
+    // total person-months of work is conserved-ish (same peak-derived scale,
+    // just spread across roughly double the months), and the change is live.
+    expect(after.filter((v) => v > 0).length).toBeGreaterThan(
+      before.filter((v) => v > 0).length,
+    );
+  });
+
+  it('switches to a generic template, rescaled to the same peak, when the staffing curve changes', () => {
+    const w = ATLAS.workPackages[0]; // atlas-w1: baseline 'Comparable-project curve'
+    const changed = { ...w, staffingCurve: 'Even distribution' as const };
+    const curve = resolveWorkPackageCurve(changed);
+    const nonZero = curve.filter((v) => v > 0);
+    expect(nonZero.length).toBe(w.durationMonths);
+    expect(Math.max(...curve)).toBeCloseTo(Math.max(...w.curve), 5);
   });
 });
 
@@ -170,5 +198,17 @@ describe('dates, units, and work packages', () => {
     bad[0].valuePercent = 25;
     bad[1].selfPerformPercent = 50;
     expect(validateWorkPackages(bad)).toHaveLength(2);
+  });
+
+  it('sums added capacity and overtime peak from the same per-month arrays reported in the result', () => {
+    const result = analyze(growth(), 'Plumber');
+    const m = metrics(result);
+    const expectedAdded =
+      result.confirmedHires.reduce((s, v) => s + v, 0) +
+      result.plannedHires.reduce((s, v) => s + v, 0) +
+      result.subcontract.reduce((s, v) => s + v, 0);
+    expect(m.addedCapacityFteMonths).toBeCloseTo(expectedAdded, 6);
+    expect(m.addedCapacityFteMonths).toBeGreaterThan(0);
+    expect(m.overtimePeak).toBeCloseTo(Math.max(...result.overtime), 6);
   });
 });
