@@ -795,3 +795,23 @@ export function monthlyComposition(result: DemandResult, topN = 4) {
   });
   return { rows, series: [...topNames, 'Other'] };
 }
+
+/**
+ * The first and last month a curve is active (nonzero), inclusive. Used to
+ * position a project's bar in the Portfolio Overlap timeline. Returns null
+ * for a curve that's zero everywhere (e.g. fully excluded work packages).
+ */
+export function activeRange(
+  curve: number[],
+): { start: number; end: number } | null {
+  const start = curve.findIndex((v) => v > 0);
+  if (start < 0) return null;
+  let end = start;
+  for (let i = curve.length - 1; i >= 0; i--) {
+    if (curve[i] > 0) {
+      end = i;
+      break;
+    }
+  }
+  return { start, end };
+}

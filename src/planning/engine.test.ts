@@ -7,6 +7,7 @@ import {
 } from '../data/sampleData';
 import {
   actionStartDate,
+  activeRange,
   analyze,
   assumptionFlagsForProject,
   demand,
@@ -319,6 +320,37 @@ describe('portfolio-planning rollups', () => {
       // Drivers below the 0.02 FTE inclusion threshold in demand() are the
       // only source of rounding difference against the reported total.
       expect(total).toBeCloseTo(result.scenario[i], 0);
+    });
+  });
+});
+
+describe('portfolio overlap timeline', () => {
+  it('finds the first and last active month of a curve, inclusive', () => {
+    expect(activeRange([0, 0, 3, 4, 0, 5, 0, 0])).toEqual({
+      start: 2,
+      end: 5,
+    });
+    expect(activeRange([0, 0, 0])).toBeNull();
+    expect(activeRange([7])).toEqual({ start: 0, end: 0 });
+  });
+
+  it("rolls a project's own work-package inclusion into its overlap range", () => {
+    const p1 = PROJECTS.find((p) => p.id === 'p1')!;
+    const full = activeRange(rollupProjectCurve(p1));
+    const withoutFirstPackage = activeRange(
+      rollupProjectCurve(p1, { [p1.workPackages![0].id]: false }),
+    );
+    expect(full).not.toBeNull();
+    // Excluding a package can only shrink or keep the active window the same,
+    // never grow it beyond the fully-included case.
+    expect(withoutFirstPackage!.start).toBeGreaterThanOrEqual(full!.start);
+    expect(withoutFirstPackage!.end).toBeLessThanOrEqual(full!.end);
+  });
+
+  it('gives every sample hard-backlog project a fabricated job-site location', () => {
+    const hardProjects = PROJECTS.filter((p) => p.type === 'Hard');
+    hardProjects.forEach((p) => {
+      expect(p.location).toBeTruthy();
     });
   });
 });

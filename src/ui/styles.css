@@ -2016,3 +2016,104 @@ td .muted {
 .composition-card {
   margin-top: 16px;
 }
+
+.overlap-card {
+  margin-top: 20px;
+}
+.overlap-toggle {
+  display: flex;
+  border: 1px solid var(--border-2);
+}
+.overlap-toggle button {
+  border: none;
+  border-right: 1px solid var(--border-2);
+  background: #fff;
+  padding: 7px 12px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.overlap-toggle button:last-child {
+  border-right: none;
+}
+.overlap-toggle button.on {
+  background: #161514;
+  color: #fff;
+}
+.overlap-scroll {
+  overflow-x: auto;
+  margin-top: 12px;
+  border: 1px solid var(--border-1);
+}
+.overlap-row {
+  display: grid;
+  grid-template-columns: 200px repeat(18, minmax(34px, 1fr));
+  align-items: center;
+  min-width: 820px;
+  border-bottom: 1px solid var(--border-1);
+}
+.overlap-row:last-child {
+  border-bottom: none;
+}
+.overlap-months {
+  background: var(--bg-subtle);
+  position: sticky;
+  top: 0;
+}
+.overlap-month {
+  border: none;
+  background: transparent;
+  padding: 8px 2px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+  text-align: center;
+}
+.overlap-month:hover {
+  color: #161514;
+  background: var(--border-1);
+}
+.overlap-group-label {
+  grid-column: 1/-1;
+  background: var(--bg-subtle);
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  border-bottom: 1px solid var(--border-1);
+  border-top: 1px solid var(--border-1);
+}
+.overlap-row-label {
+  grid-column: 1;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.overlap-row-label small {
+  color: var(--fg-3);
+  font-size: 10px;
+}
+.overlap-bar {
+  grid-row: 1;
+  height: 26px;
+  margin: 0 2px;
+  background: var(--upchurch-blue);
+  color: #fff;
+  border: none;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.overlap-bar:hover {
+  background: var(--blue-600) !important;
+  border-color: transparent !important;
+}

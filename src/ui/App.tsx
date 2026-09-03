@@ -48,6 +48,7 @@ import type {
 import {
   actionMilestones,
   actionStartDate,
+  activeRange,
   analyze,
   assumptionFlagsForProject,
   datePosition,
@@ -58,6 +59,7 @@ import {
   monthlyComposition,
   peopleMetricsForProject,
   recommendations,
+  rollupProjectCurve,
   validateWorkPackages,
 } from '../planning/engine';
 import { loadPlans, resetPlans, savePlans } from '../persistence/planStore';
@@ -347,6 +349,8 @@ export function App() {
             drawer={drawer}
             setDrawer={setDrawer}
             openProposed={openProposed}
+            setTab={setTab}
+            setSelectedMonth={setSelectedMonth}
           />
         )}
         {tab === 'scenario' && (
@@ -1251,6 +1255,8 @@ function Projects({
   drawer,
   setDrawer,
   openProposed,
+  setTab,
+  setSelectedMonth,
 }: {
   config: ScenarioConfig;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
@@ -1258,6 +1264,8 @@ function Projects({
   drawer: Project | null;
   setDrawer: (p: Project | null) => void;
   openProposed: () => void;
+  setTab: (t: Tab) => void;
+  setSelectedMonth: (v: number | null) => void;
 }) {
   return (
     <section className="screen-card">
@@ -1489,7 +1497,133 @@ function Projects({
           </tbody>
         </table>
       </div>
+      <PortfolioOverlap
+        config={config}
+        setDrawer={setDrawer}
+        setTab={setTab}
+        setSelectedMonth={setSelectedMonth}
+      />
       {drawer && null}
+    </section>
+  );
+}
+function PortfolioOverlap({
+  config,
+  setDrawer,
+  setTab,
+  setSelectedMonth,
+}: {
+  config: ScenarioConfig;
+  setDrawer: (p: Project | null) => void;
+  setTab: (t: Tab) => void;
+  setSelectedMonth: (v: number | null) => void;
+}) {
+  const [groupBy, setGroupBy] = useState<'trade' | 'location'>('trade');
+  const rows = PROJECTS.filter((p) => config.included[p.id] !== false)
+    .map((p) => ({
+      project: p,
+      range: activeRange(rollupProjectCurve(p, config.packageIncluded)),
+      people: peopleMetricsForProject(p),
+    }))
+    .filter((r) => r.range !== null);
+
+  const groups: [string, typeof rows][] =
+    groupBy === 'location'
+      ? Object.entries(
+          rows.reduce<Record<string, typeof rows>>((acc, r) => {
+            const key = r.project.location ?? 'Unspecified location';
+            (acc[key] ??= []).push(r);
+            return acc;
+          }, {}),
+        ).sort(([a], [b]) => a.localeCompare(b))
+      : [['All projects', rows]];
+
+  return (
+    <section className="chart-card overlap-card">
+      <div className="card-heading">
+        <div>
+          <span>PORTFOLIO OVERLAP</span>
+          <h2>Who is on site, month by month</h2>
+        </div>
+        <div
+          className="overlap-toggle"
+          role="group"
+          aria-label="Group Portfolio Overlap rows"
+        >
+          <button
+            className={groupBy === 'trade' ? 'on' : ''}
+            onClick={() => setGroupBy('trade')}
+          >
+            By trade
+          </button>
+          <button
+            className={groupBy === 'location' ? 'on' : ''}
+            onClick={() => setGroupBy('location')}
+          >
+            By location
+          </button>
+        </div>
+      </div>
+      <div className="overlap-scroll">
+        <div className="overlap-row overlap-months">
+          <div />
+          {MONTHS.map((m, i) => (
+            <button
+              key={m}
+              className="overlap-month"
+              aria-label={`Inspect ${m} on the bottleneck dashboard`}
+              onClick={() => {
+                setSelectedMonth(i);
+                setTab('dashboard');
+              }}
+            >
+              {m.slice(0, 3)}
+            </button>
+          ))}
+        </div>
+        {groups.map(([label, groupRows]) => (
+          <div className="overlap-group" key={label}>
+            {groupBy === 'location' && (
+              <div className="overlap-group-label">
+                {label} · {groupRows.length}{' '}
+                {groupRows.length === 1 ? 'project' : 'projects'}
+              </div>
+            )}
+            {groupRows.map(({ project: p, range, people }) => (
+              <div className="overlap-row" key={p.id}>
+                <div className="overlap-row-label">
+                  <button className="text-link" onClick={() => setDrawer(p)}>
+                    {p.name}
+                  </button>
+                  <small>
+                    {p.location ?? p.department} · {p.workweekHours ?? 40}-hr
+                    week
+                  </small>
+                </div>
+                {range && (
+                  <button
+                    className="overlap-bar"
+                    style={{
+                      gridColumnStart: range.start + 2,
+                      gridColumnEnd: range.end + 3,
+                    }}
+                    onClick={() => setDrawer(p)}
+                    aria-label={`${p.name}: open project detail, peak ${people.peakCrew.toFixed(1)}`}
+                  >
+                    {people.peakCrew.toFixed(1)} peak
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      <p className="info-note">
+        Bars span each project&apos;s active months with its peak crew labeled.
+        Click a bar to open that project, or a month header to inspect that
+        month on the bottleneck dashboard. This complements — it does not
+        replace — the bottleneck chart there.
+      </p>
     </section>
   );
 }

@@ -162,6 +162,12 @@ export interface Project {
   weeklyCrew?: number[];
   /** ISO date the source forecast was last revised. Drives freshness. */
   lastRevisionDate?: string;
+  /**
+   * Fabricated job-site location (city, state), distinct from
+   * `department` (an org/business-unit grouping). Used by the Portfolio
+   * Overlap view's "by location" grouping.
+   */
+  location?: string;
 }
 export interface ProposedProject {
   id: string;
