@@ -2117,3 +2117,128 @@ td .muted {
   background: var(--blue-600) !important;
   border-color: transparent !important;
 }
+
+/* ---- Guided tour ---- */
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+}
+.tour-click-shield {
+  position: fixed;
+  inset: 0;
+  pointer-events: auto;
+  background: transparent;
+}
+.tour-dim {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.6);
+}
+.tour-spotlight {
+  position: fixed;
+  pointer-events: none;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
+  border: 2px solid var(--upchurch-blue);
+  transition:
+    top 0.2s ease,
+    left 0.2s ease,
+    width 0.2s ease,
+    height 0.2s ease;
+}
+.tour-callout {
+  position: fixed;
+  z-index: 201;
+  width: 320px;
+  background: #fff;
+  border: 1px solid var(--border-2);
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+.tour-callout > span {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  margin-bottom: 6px;
+}
+.tour-callout h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.tour-callout p {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--neutral-600);
+}
+.tour-progress {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.tour-progress i {
+  flex: 1;
+  height: 3px;
+  background: var(--border-1);
+}
+.tour-progress i.on {
+  background: var(--upchurch-blue);
+}
+.tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.tour-actions button {
+  border: 1px solid var(--border-2);
+  background: #fff;
+  padding: 7px 12px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.tour-actions > div {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- Help menu ---- */
+.help-menu {
+  position: relative;
+}
+.help-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  width: 220px;
+  background: #fff;
+  border: 1px solid var(--border-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+.help-menu-list button {
+  border: none;
+  border-bottom: 1px solid var(--border-1);
+  background: #fff;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  text-align: left;
+}
+.help-menu-list button:last-child {
+  border-bottom: none;
+}
+.help-menu-list button:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-1) !important;
+}

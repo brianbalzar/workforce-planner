@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -63,8 +64,9 @@ import {
   validateWorkPackages,
 } from '../planning/engine';
 import { loadPlans, resetPlans, savePlans } from '../persistence/planStore';
+import { GuidedTour, TOUR_SEEN_KEY } from './GuidedTour';
 
-type Tab =
+export type Tab =
   | 'dashboard'
   | 'projects'
   | 'scenario'
@@ -135,6 +137,15 @@ export function App() {
   const [step, setStep] = useState(4);
   const [compareIds, setCompareIds] = useState<string[]>(['current', 'growth']);
   const [toast, setToast] = useState('');
+  const [tourActive, setTourActive] = useState(() => {
+    try {
+      return !localStorage.getItem(TOUR_SEEN_KEY);
+    } catch {
+      // best-effort only — a private-mode/blocked-storage browser simply
+      // never auto-shows the tour, but it stays reachable from the Help menu.
+      return false;
+    }
+  });
   const plan = plans.find((p) => p.id === planId) || plans[0];
   const result = useMemo(() => analyze(live, category), [live, category]);
   const summary = useMemo(() => metrics(result), [result]);
@@ -259,7 +270,7 @@ export function App() {
           <span />
           WORKFORCE PLANNER
         </div>
-        <div className="sample">
+        <div className="sample" data-tour="banner">
           <i />
           PROTOTYPE — SAMPLE DATA ONLY
         </div>
@@ -274,6 +285,10 @@ export function App() {
           </p>
         </div>
         <div className="header-actions">
+          <HelpMenu
+            onTour={() => setTourActive(true)}
+            onGuide={() => setTab('help')}
+          />
           <button
             onClick={() => {
               setTab('plans');
@@ -287,7 +302,7 @@ export function App() {
           </button>
         </div>
       </header>
-      <nav className="tabs" aria-label="Primary navigation">
+      <nav className="tabs" aria-label="Primary navigation" data-tour="tabs">
         {tabList.map(([key, label]) => (
           <button
             key={key}
@@ -446,6 +461,73 @@ export function App() {
         />
       )}
       {toast && <output className="toast">{toast}</output>}
+      <GuidedTour
+        active={tourActive}
+        tab={tab}
+        setTab={setTab}
+        onFinish={() => setTourActive(false)}
+      />
+    </div>
+  );
+}
+
+function HelpMenu({
+  onTour,
+  onGuide,
+}: {
+  onTour: () => void;
+  onGuide: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node))
+        setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  return (
+    <div className="help-menu" ref={ref}>
+      <button
+        data-tour="help-menu"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        HELP <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="help-menu-list" role="menu">
+          <button
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onTour();
+            }}
+          >
+            Take the guided tour
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onGuide();
+            }}
+          >
+            Open the pilot guide
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -498,7 +580,7 @@ function ControlBar(p: {
       >
         <input readOnly value="Sep 2026 — Feb 2028 · 18-month window" />
       </Field>
-      <div className="unit-control">
+      <div className="unit-control" data-tour="unit-toggle">
         <span>VIEW AS</span>
         <div>
           {(['People', 'Hours', 'Labor Cost'] as Unit[]).map((v) => (
@@ -688,7 +770,7 @@ function Dashboard({
           detail={`${plan.name} · ${plan.status} · ${summary.unconfirmedPeak.toFixed(1)} FTE unconfirmed at peak.`}
         />
       </section>
-      <section className="chart-card">
+      <section className="chart-card" data-tour="bottleneck-chart">
         <div className="card-heading">
           <div>
             <span>DEMAND VERSUS EXECUTABLE CAPACITY</span>
@@ -697,7 +779,7 @@ function Dashboard({
             </h2>
           </div>
           <div className="chart-heading-controls">
-            <label className="chart-month-jump">
+            <label className="chart-month-jump" data-tour="month-jump">
               <span className="field-label">JUMP TO MONTH</span>
               <select
                 aria-label="Select a month to inspect (keyboard-accessible alternative to clicking the chart)"
@@ -938,7 +1020,10 @@ function MonthlyCompositionChart({
   const { rows, series } = useMemo(() => monthlyComposition(result), [result]);
   const colors = ['#0068cc', '#8e2da8', '#009500', '#b8740b', '#c9c7c2'];
   return (
-    <section className="chart-card composition-card">
+    <section
+      className="chart-card composition-card"
+      data-tour="composition-chart"
+    >
       <div className="card-heading">
         <div>
           <span>MONTHLY COMPOSITION OF DEMAND</span>
@@ -1291,7 +1376,7 @@ function Projects({
           <RotateCcw size={14} /> RESTORE ALL BASELINES
         </button>
       </div>
-      <div className="table-scroll">
+      <div className="table-scroll" data-tour="projects-table">
         <table>
           <thead>
             <tr>
@@ -1539,7 +1624,7 @@ function PortfolioOverlap({
       : [['All projects', rows]];
 
   return (
-    <section className="chart-card overlap-card">
+    <section className="chart-card overlap-card" data-tour="overlap">
       <div className="card-heading">
         <div>
           <span>PORTFOLIO OVERLAP</span>
@@ -1965,7 +2050,7 @@ function Scenario({
   cancel: () => void;
 }) {
   return (
-    <div className="scenario-layout">
+    <div className="scenario-layout" data-tour="scenario">
       <aside className="step-rail">
         {scenarioSteps.map((label, i) => (
           <button
@@ -2273,7 +2358,7 @@ function Capacity({
     ['attritionPercent', 'Attrition %'],
   ];
   return (
-    <div className="capacity-layout">
+    <div className="capacity-layout" data-tour="capacity">
       <section className="screen-card">
         <div className="section-title">
           <div>
@@ -2441,7 +2526,7 @@ function Plans({
     );
   };
   return (
-    <section className="screen-card plans-screen">
+    <section className="screen-card plans-screen" data-tour="plans">
       <div className="section-title">
         <div>
           <span>MANAGED WORKFORCE PLANS</span>
