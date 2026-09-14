@@ -46,6 +46,10 @@ jobs:
 
       - name: Build (Pages sub-path aware — see vite.config.ts)
         run: npm run build
+        env:
+          # GitHub Pages contains no workforce dataset. Visitors explicitly
+          # select a contract-valid JSON file for each browser session.
+          VITE_DATA_MODE: upload
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

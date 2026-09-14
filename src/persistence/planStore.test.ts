@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { INITIAL_PLANS } from '../data/sampleData';
-import { loadPlans, PLAN_STORAGE_KEY, savePlans } from './planStore';
+import {
+  loadPlans,
+  loadPlanState,
+  PLAN_STORAGE_KEY,
+  savePlans,
+} from './planStore';
 
 describe('versioned plan persistence', () => {
   it('serializes and restores plans', () => {
@@ -52,11 +57,27 @@ describe('versioned plan persistence', () => {
     expect(plan.config.packageIncluded).toEqual(
       INITIAL_PLANS[0].config.packageIncluded,
     );
-    expect(plan.config.proposedIncluded).toBe(
+    expect(plan.config.proposedIncluded).toEqual(
       INITIAL_PLANS[0].config.proposedIncluded,
     );
     expect(Array.isArray(plan.config.actions)).toBe(true);
     expect(plan.config.capacity).toEqual(INITIAL_PLANS[0].config.capacity);
+  });
+
+  it('fills newly introduced fields inside an older capacity assumption', () => {
+    const oldCapacity = structuredClone(INITIAL_PLANS[0].config.capacity);
+    delete (oldCapacity.Plumber as { prefabCapacity?: number }).prefabCapacity;
+    const raw = JSON.stringify({
+      version: 1,
+      plans: [
+        {
+          ...INITIAL_PLANS[0],
+          config: { ...INITIAL_PLANS[0].config, capacity: oldCapacity },
+        },
+      ],
+    });
+    const [plan] = loadPlans({ getItem: () => raw });
+    expect(plan.config.capacity.Plumber.prefabCapacity).toBe(0);
   });
 
   it('drops malformed plan records instead of corrupting the whole list', () => {
@@ -69,5 +90,19 @@ describe('versioned plan persistence', () => {
     expect(loadPlans({ getItem: () => raw })).toHaveLength(
       INITIAL_PLANS.length,
     );
+  });
+
+  it('flags plans saved against an older published source revision', () => {
+    let value: string | null = null;
+    savePlans(
+      INITIAL_PLANS,
+      { setItem: (_key, next) => (value = next) },
+      'old-publication',
+    );
+    const state = loadPlanState('new-publication', {
+      getItem: () => value,
+    });
+    expect(state.sourceChanged).toBe(true);
+    expect(state.plans).toHaveLength(INITIAL_PLANS.length);
   });
 });

@@ -5,22 +5,10 @@ export type PlanStatus =
   | 'Approved Operating Plan'
   | 'Superseded'
   | 'Archived';
-export type LaborCategory =
-  | 'Project Manager'
-  | 'Project Engineer'
-  | 'Superintendent'
-  | 'Foreman'
-  | 'Plumber'
-  | 'Pipefitter'
-  | 'Sheet-Metal Worker'
-  | 'Welder'
-  | 'HVAC Mechanic'
-  | 'Electrician'
-  | 'Electrical Apprentice'
-  | 'Plumbing Apprentice'
-  | 'Controls Technician'
-  | 'BIM/VDC Specialist'
-  | 'Project Coordinator';
+// Labor categories are data-owned. The demo dataset supplies the familiar
+// categories, while a published dataset can add organization-specific roles
+// (for example, Material Handler) without requiring an app release.
+export type LaborCategory = string;
 export type StaffingCurve =
   | 'Comparable-project curve'
   | 'Standard ramp / peak / taper'
@@ -120,12 +108,26 @@ export interface Project {
   id: string;
   name: string;
   department: string;
+  projectType?: string;
+  bidDate?: string;
+  estimateFileName?: string;
   type: 'Hard' | 'Soft';
   value: number;
   planningProbability: number;
   sourceProbability: number;
   startIndex: number;
   curve: number[];
+  /** Whether curve values are total internal FTE or a legacy base-category curve. */
+  curveBasis?: 'total-internal-labor' | 'base-category';
+  /** Inputs used to create an editable Soft Backlog staffing curve. */
+  softBacklogForecast?: {
+    totalLaborHours: number;
+    startMonth: string;
+    endMonth: string;
+    method: 'straight-line' | 'bell-curve';
+    productiveHoursPerFteMonth: number;
+    generated: boolean;
+  };
   method: string;
   quality: string;
   primaryLabor: string;
@@ -188,8 +190,39 @@ export interface ProposedProject {
   laborAllocation: Record<LaborCategory, number>;
   workPackages: WorkPackage[];
 }
+/**
+ * Data-owned rules of thumb used to seed the lightweight proposed-project
+ * workflow. These are deliberately separate from a proposed project itself:
+ * the data pipeline can refine the assumptions without an app release, while
+ * users can still adjust the generated project before saving it.
+ */
+export interface ProposedProjectArchetype {
+  id: string;
+  name: string;
+  projectType: string;
+  defaultDurationMonths: number;
+  staffingCurve: StaffingCurve;
+  costMix: {
+    material: number;
+    internalLabor: number;
+    subcontract: number;
+    other: number;
+  };
+  laborAllocation: Partial<Record<LaborCategory, number>>;
+  /** Optional until historical estimates support a defensible conversion. */
+  laborHoursPerMillion?: number;
+  notes?: string;
+}
 export interface CapacityAssumption {
   headcount: number;
+  /**
+   * Monthly FTE-equivalent of onsite labor the pre-fab shop can offset for
+   * this category. Treated as a first source in `analyze()`: it reduces
+   * the demand that must be covered by existing staff, hires, subcontract,
+   * or overtime, before any of those are counted. Never exceeds a given
+   * month's demand (idle shop capacity is not banked into other months).
+   */
+  prefabCapacity: number;
   productiveHours: number;
   hourlyRate: number;
   overtimeLimit: number;
@@ -235,8 +268,8 @@ export interface ScenarioConfig {
   included: Record<string, boolean>;
   shifts: Record<string, number>;
   packageIncluded: Record<string, boolean>;
-  proposedIncluded: boolean;
-  proposed: ProposedProject;
+  proposedIncluded: Record<string, boolean>;
+  proposedProjects: ProposedProject[];
   actions: CapacityAction[];
   capacity: Record<LaborCategory, CapacityAssumption>;
 }
@@ -252,6 +285,31 @@ export interface WorkforcePlan {
   stale?: boolean;
   config: ScenarioConfig;
 }
+
+export interface PlannerDataSource {
+  hardBacklogAsOf: string;
+  softBacklogAsOf?: string;
+  notes?: string;
+}
+
+/**
+ * Versioned, environment-independent contract served at
+ * /data/workforce-planner.json. Month values are ISO YYYY-MM keys; the app
+ * derives display labels so the same file works in every browser locale.
+ */
+export interface PlannerData {
+  schemaVersion: 1;
+  publishedAt: string;
+  forecastStart: string;
+  months: string[];
+  source: PlannerDataSource;
+  departments: string[];
+  laborCategories: LaborCategory[];
+  categoryFactors: Record<LaborCategory, number>;
+  proposedProjectArchetypes: ProposedProjectArchetype[];
+  projects: Project[];
+  initialPlans: WorkforcePlan[];
+}
 export interface DemandResult {
   hard: number[];
   expected: number[];
@@ -260,6 +318,8 @@ export interface DemandResult {
   drivers: Array<Array<{ name: string; type: string; fte: number }>>;
 }
 export interface CapacityResult {
+  /** Onsite demand offset by the pre-fab shop each month — see `CapacityAssumption.prefabCapacity`. */
+  prefab: number[];
   existing: number[];
   confirmedHires: number[];
   plannedHires: number[];

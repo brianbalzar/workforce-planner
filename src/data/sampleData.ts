@@ -506,6 +506,11 @@ export const CAPACITY = Object.fromEntries(
       category,
       {
         headcount,
+        // No pre-fab offset by default for any category — the Growth Plan's
+        // baseline numbers are matched exactly to the handoff spec's demand
+        // table, and a nonzero default here would silently shift them.
+        // Set this per category in the Workforce Capacity tab.
+        prefabCapacity: 0,
         productiveHours,
         hourlyRate,
         overtimeLimit,
@@ -640,8 +645,10 @@ const config = (
   included: Object.fromEntries(PROJECTS.map((p) => [p.id, true])),
   shifts: {},
   packageIncluded: {},
-  proposedIncluded: kind === 'growth' || kind === 'full',
-  proposed: structuredClone(ATLAS),
+  proposedIncluded: {
+    [ATLAS.id]: kind === 'growth' || kind === 'full',
+  },
+  proposedProjects: [structuredClone(ATLAS)],
   actions: structuredClone(
     kind === 'growth' || kind === 'full'
       ? ACTIONS

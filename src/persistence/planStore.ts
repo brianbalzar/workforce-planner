@@ -1,10 +1,15 @@
 import type { ScenarioConfig, WorkforcePlan } from '../domain/types';
-import { INITIAL_PLANS } from '../data/sampleData';
+import { INITIAL_PLANS, getRuntimeDataInfo } from '../data/runtimeData';
 
 const KEY = 'wfp.plans.v1';
 interface Payload {
-  version: 1;
+  version: 1 | 2;
   plans: WorkforcePlan[];
+  sourceRevision?: string;
+}
+export interface PlanLoadState {
+  plans: WorkforcePlan[];
+  sourceChanged: boolean;
 }
 
 // Older saved data (or data missing fields introduced by a later build) is
@@ -16,18 +21,46 @@ const TEMPLATE = INITIAL_PLANS[0].config;
 function normalizeConfig(config: unknown): ScenarioConfig {
   const c = (
     config && typeof config === 'object' ? config : {}
-  ) as Partial<ScenarioConfig>;
+  ) as Partial<ScenarioConfig> & {
+    proposedIncluded?: Record<string, boolean> | boolean;
+    proposed?: ScenarioConfig['proposedProjects'][number];
+  };
+  const proposedProjects = Array.isArray(c.proposedProjects)
+    ? c.proposedProjects
+    : c.proposed
+      ? [c.proposed]
+      : structuredClone(TEMPLATE.proposedProjects);
+  const proposedIncluded =
+    c.proposedIncluded && typeof c.proposedIncluded === 'object'
+      ? { ...TEMPLATE.proposedIncluded, ...c.proposedIncluded }
+      : typeof c.proposedIncluded === 'boolean' && proposedProjects[0]
+        ? { [proposedProjects[0].id]: c.proposedIncluded }
+        : { ...TEMPLATE.proposedIncluded };
+  const savedCapacity =
+    c.capacity && typeof c.capacity === 'object' ? c.capacity : {};
+  const capacity = Object.fromEntries(
+    Object.entries(TEMPLATE.capacity).map(([category, defaults]) => [
+      category,
+      {
+        ...defaults,
+        ...(savedCapacity[category] &&
+        typeof savedCapacity[category] === 'object'
+          ? savedCapacity[category]
+          : {}),
+      },
+    ]),
+  );
   return {
     probabilities: { ...TEMPLATE.probabilities, ...c.probabilities },
     included: { ...TEMPLATE.included, ...c.included },
     shifts: { ...TEMPLATE.shifts, ...c.shifts },
     packageIncluded: { ...TEMPLATE.packageIncluded, ...c.packageIncluded },
-    proposedIncluded: c.proposedIncluded ?? TEMPLATE.proposedIncluded,
-    proposed: c.proposed ?? structuredClone(TEMPLATE.proposed),
+    proposedIncluded,
+    proposedProjects: structuredClone(proposedProjects),
     actions: Array.isArray(c.actions)
       ? c.actions
       : structuredClone(TEMPLATE.actions),
-    capacity: { ...TEMPLATE.capacity, ...c.capacity },
+    capacity,
   };
 }
 
@@ -52,25 +85,45 @@ function normalizePlan(plan: unknown): WorkforcePlan | null {
 export function loadPlans(
   storage: Pick<Storage, 'getItem'> = localStorage,
 ): WorkforcePlan[] {
+  return loadPlanState(getRuntimeDataInfo().sourceRevision, storage).plans;
+}
+
+export function loadPlanState(
+  currentSourceRevision: string,
+  storage: Pick<Storage, 'getItem'> = localStorage,
+): PlanLoadState {
   try {
     const raw = storage.getItem(KEY);
-    if (!raw) return structuredClone(INITIAL_PLANS);
+    if (!raw)
+      return { plans: structuredClone(INITIAL_PLANS), sourceChanged: false };
     const data = JSON.parse(raw) as Payload;
-    if (data.version !== 1 || !Array.isArray(data.plans) || !data.plans.length)
+    if (
+      ![1, 2].includes(data.version) ||
+      !Array.isArray(data.plans) ||
+      !data.plans.length
+    )
       throw new Error('Invalid plan store');
     const normalized = data.plans
       .map(normalizePlan)
       .filter((p): p is WorkforcePlan => p !== null);
-    return normalized.length ? normalized : structuredClone(INITIAL_PLANS);
+    return {
+      plans: normalized.length ? normalized : structuredClone(INITIAL_PLANS),
+      sourceChanged:
+        !!normalized.length && data.sourceRevision !== currentSourceRevision,
+    };
   } catch {
-    return structuredClone(INITIAL_PLANS);
+    return { plans: structuredClone(INITIAL_PLANS), sourceChanged: false };
   }
 }
 export function savePlans(
   plans: WorkforcePlan[],
   storage: Pick<Storage, 'setItem'> = localStorage,
+  sourceRevision = getRuntimeDataInfo().sourceRevision,
 ) {
-  storage.setItem(KEY, JSON.stringify({ version: 1, plans } satisfies Payload));
+  storage.setItem(
+    KEY,
+    JSON.stringify({ version: 2, sourceRevision, plans } satisfies Payload),
+  );
 }
 export function resetPlans(
   storage: Pick<Storage, 'removeItem'> = localStorage,

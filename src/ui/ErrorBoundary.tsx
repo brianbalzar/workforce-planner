@@ -40,7 +40,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <h1>Something went wrong</h1>
           <p>
             The workforce planner hit an unexpected error, most likely from a
-            saved plan created by an earlier build of this prototype.
+            saved plan created by an earlier build of this planner.
           </p>
           <p className="error-boundary-detail">{this.state.error.message}</p>
           <button className="primary" onClick={this.resetAndReload}>

@@ -79,3 +79,20 @@ Remaining recommendations from this second pass:
 6. **Decide on the self-contained deployment approach.** Google Fonts are still loaded from external URLs, and the repository has no configured GitHub remote, so the final GitHub Pages subpath has not yet been verified. Bundle fonts or use system fallbacks, then test the deployed path and social-preview metadata.
 
 7. **Validate the new data-model assumptions with operations leadership.** The new People metrics, weekly-to-monthly peak rollup, forecast freshness labels, and assumption flags are useful additions, but the workweek interpretation and the distinction between peak crew and implied people should be confirmed with the intended audience.
+
+## Deployed GitHub Pages review — September 3, 2026
+
+The production URL was reviewed directly at `https://brianbalzar.github.io/workforce-planner/`.
+
+- The GitHub Pages base path works and the Upchurch logo asset loads from the expected `/workforce-planner/assets/` path.
+- The first-run tour appears on a fresh visit and explains the workflow clearly. It contains 14 steps; consider making it shorter for a live demonstration, with a “Restart tour” option available from Help.
+- Dashboard, Projects & Forecasts, Scenario Builder, Workforce Capacity, Saved Plans, Help, Plan Comparison, and Portfolio Overlap were all reachable in production.
+- Portfolio Overlap grouping and month-inspection controls responded correctly.
+- The deployed version displayed no new blank-screen or navigation failure during the walkthrough.
+- At 1024px and 390px, the semantic content remains reachable, but a visual pass is still recommended for header wrapping, horizontal tables, the Scenario Builder step rail, and modal height.
+
+Production-specific cautions:
+
+1. The live site is publicly readable while the repository/pages configuration is public; there is no application-level password gate. Keep all data fabricated and use repository/access visibility controls for the boss demonstration rather than placing sensitive information in the static app.
+2. The production bundle still carries the large-main-chunk warning (approximately 646 KB JavaScript). This is not a demo blocker, but it is the clearest performance/maintainability follow-up.
+3. The remaining proposed-project gaps (Quick/Detailed modes and per-work-package labor-category allocation) are still visible in the deployed flow.

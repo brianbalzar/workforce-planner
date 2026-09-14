@@ -5,6 +5,7 @@ import {
   LABOR_SOURCE_MAP,
   PROJECTS,
 } from '../data/sampleData';
+import { PROJECTS as RUNTIME_PROJECTS } from '../data/runtimeData';
 import {
   actionStartDate,
   activeRange,
@@ -31,6 +32,31 @@ const growth = () =>
 const rounded = (values: number[]) => values.map(Math.round);
 
 describe('planning demand', () => {
+  it('splits an estimate-imported total FTE curve by labor allocation', () => {
+    const cfg = growth();
+    const imported = {
+      ...structuredClone(PROJECTS[0]),
+      id: 'estimate-total-fte-test',
+      name: 'Estimate total FTE test',
+      type: 'Soft' as const,
+      planningProbability: 100,
+      sourceProbability: 100,
+      curveBasis: 'total-internal-labor' as const,
+      curve: [10, ...Array(17).fill(0)],
+      workPackages: undefined,
+      laborAllocation: { Plumber: 80, Foreman: 20 },
+    };
+    const beforePlumber = demand(cfg, 'Plumber').scenario[0];
+    const beforeForeman = demand(cfg, 'Foreman').scenario[0];
+    RUNTIME_PROJECTS.push(imported);
+    try {
+      expect(demand(cfg, 'Plumber').scenario[0] - beforePlumber).toBeCloseTo(8);
+      expect(demand(cfg, 'Foreman').scenario[0] - beforeForeman).toBeCloseTo(2);
+    } finally {
+      RUNTIME_PROJECTS.pop();
+    }
+  });
+
   it('reproduces the specified hard, expected, and scenario demand', () => {
     const result = demand(growth(), 'Plumber');
     expect(rounded(result.hard)).toEqual([
@@ -74,8 +100,28 @@ describe('planning demand', () => {
   it('builds the proposed curve and handles zero labor allocation', () => {
     const cfg = growth();
     expect(Math.max(...proposedCurve(cfg, 'Plumber'))).toBeCloseTo(10, 1);
-    cfg.proposed.laborAllocation.Plumber = 0;
+    cfg.proposedProjects[0].laborAllocation.Plumber = 0;
     expect(proposedCurve(cfg, 'Plumber').every((v) => v === 0)).toBe(true);
+  });
+
+  it('combines multiple proposed projects and can scope demand by department', () => {
+    const cfg = growth();
+    const second = structuredClone(cfg.proposedProjects[0]);
+    second.id = 'second-proposed';
+    second.name = 'Second proposed project';
+    cfg.proposedProjects.push(second);
+    cfg.proposedIncluded[second.id] = true;
+    const oneProject = proposedCurve(growth(), 'Plumber');
+    const twoProjects = proposedCurve(cfg, 'Plumber');
+    expect(Math.max(...twoProjects)).toBeCloseTo(
+      Math.max(...oneProject) * 2,
+      5,
+    );
+    expect(
+      demand(cfg, 'Plumber', 'Electrical — Central').scenario.every(
+        (value) => value === 0,
+      ),
+    ).toBe(true);
   });
 
   it('leaves a work package curve exactly as authored when nothing changed', () => {
@@ -86,7 +132,7 @@ describe('planning demand', () => {
   it('stretches a work package curve live when only its duration changes', () => {
     const cfg = growth();
     const before = proposedCurve(cfg, 'Plumber');
-    cfg.proposed.workPackages[1].durationMonths = 16; // atlas-w2: 8 -> 16 months
+    cfg.proposedProjects[0].workPackages[1].durationMonths = 16; // atlas-w2: 8 -> 16 months
     const after = proposedCurve(cfg, 'Plumber');
     expect(after).not.toEqual(before);
     // total person-months of work is conserved-ish (same peak-derived scale,
@@ -156,6 +202,30 @@ describe('capacity and bottlenecks', () => {
     cfg.capacity.Plumber.headcount = 0;
     cfg.actions = [];
     expect(metrics(analyze(cfg, 'Plumber')).peak).toBeGreaterThan(30);
+  });
+
+  it('defaults every category to zero pre-fab capacity, leaving the baseline scenario unchanged', () => {
+    const cfg = growth();
+    expect(cfg.capacity.Plumber.prefabCapacity).toBe(0);
+    const result = analyze(cfg, 'Plumber');
+    expect(result.prefab.every((v) => v === 0)).toBe(true);
+  });
+
+  it('applies the pre-fab shop as a first source that only ever reduces the gap', () => {
+    const cfg = growth();
+    const without = analyze(cfg, 'Plumber');
+    cfg.capacity.Plumber.prefabCapacity = 2;
+    const withPrefab = analyze(cfg, 'Plumber');
+    // Demand itself is untouched — pre-fab offsets coverage, not workload.
+    expect(withPrefab.scenario).toEqual(without.scenario);
+    withPrefab.gap.forEach((g, i) => {
+      expect(g).toBeLessThanOrEqual(without.gap[i] + 1e-9);
+    });
+    expect(Math.max(...withPrefab.prefab)).toBeLessThanOrEqual(2);
+    // Never consumes more pre-fab capacity than that month actually needs.
+    withPrefab.prefab.forEach((v, i) => {
+      expect(v).toBeLessThanOrEqual(withPrefab.scenario[i] + 1e-9);
+    });
   });
 });
 

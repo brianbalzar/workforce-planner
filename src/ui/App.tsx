@@ -9,10 +9,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Download,
   HelpCircle,
   Plus,
   RotateCcw,
   Save,
+  Upload,
   X,
 } from 'lucide-react';
 import {
@@ -28,12 +30,31 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  addRuntimeProject,
   DEPARTMENTS,
+  getActivePlannerData,
+  getRuntimeDataInfo,
+  INITIAL_PLANS,
   LABOR_CATEGORIES,
-  LABOR_SOURCE_MAP,
+  MONTH_KEYS,
   MONTHS,
   PROJECTS,
-} from '../data/sampleData';
+  PROPOSED_PROJECT_ARCHETYPES,
+  updateRuntimeProject,
+} from '../data/runtimeData';
+import {
+  blankSoftBacklogDraft,
+  editSoftBacklogDraft,
+  generateSoftBacklogForecast,
+  parseEstimateFile,
+  type SoftBacklogDraft,
+} from '../data/estimateParser';
+import { LABOR_SOURCE_MAP } from '../data/sampleData';
+import {
+  createProposedProject,
+  resizeProposedProjectSchedule,
+  type ProposedProjectIntake,
+} from '../data/proposedProjectBuilder';
 import type {
   AssumptionFlag,
   CapacityAction,
@@ -63,7 +84,7 @@ import {
   rollupProjectCurve,
   validateWorkPackages,
 } from '../planning/engine';
-import { loadPlans, resetPlans, savePlans } from '../persistence/planStore';
+import { loadPlanState, resetPlans, savePlans } from '../persistence/planStore';
 import { GuidedTour, TOUR_SEEN_KEY } from './GuidedTour';
 
 export type Tab =
@@ -73,8 +94,16 @@ export type Tab =
   | 'capacity'
   | 'plans'
   | 'help';
-type Modal = null | 'proposed' | 'action' | 'compare';
-const TODAY = new Date(Date.UTC(2026, 8, 2));
+type Modal =
+  | null
+  | 'add-project'
+  | 'soft-backlog'
+  | 'proposed-intake'
+  | 'proposed'
+  | 'action'
+  | 'compare';
+const TODAY = new Date();
+const TODAY_MONTH_KEY = `${TODAY.getFullYear()}-${String(TODAY.getMonth() + 1).padStart(2, '0')}`;
 const tabList: [Tab, string][] = [
   ['dashboard', 'Bottleneck Dashboard'],
   ['projects', 'Projects & Forecasts'],
@@ -115,7 +144,16 @@ function useDialogA11y<T extends HTMLElement>(onEscape: () => void) {
 }
 
 export function App() {
-  const [plans, setPlans] = useState<WorkforcePlan[]>(() => loadPlans());
+  const runtimeData = getRuntimeDataInfo();
+  const [loadedPlanState] = useState(() =>
+    runtimeData.mode === 'uploaded'
+      ? { plans: clone(INITIAL_PLANS), sourceChanged: false }
+      : loadPlanState(runtimeData.sourceRevision),
+  );
+  const [plans, setPlans] = useState<WorkforcePlan[]>(loadedPlanState.plans);
+  const [sourceChanged, setSourceChanged] = useState(
+    runtimeData.mode === 'published' && loadedPlanState.sourceChanged,
+  );
   const initial = plans.find((p) => p.id === 'growth') || plans[0];
   const [planId, setPlanId] = useState(initial.id);
   const [saved, setSaved] = useState<ScenarioConfig>(() =>
@@ -124,12 +162,25 @@ export function App() {
   const [live, setLive] = useState<ScenarioConfig>(() => clone(initial.config));
   const [undo, setUndo] = useState<ScenarioConfig[]>([]);
   const [tab, setTab] = useState<Tab>('dashboard');
-  const [category, setCategory] = useState<LaborCategory>('Plumber');
+  const [category, setCategory] = useState<LaborCategory>(
+    LABOR_CATEGORIES.includes('Plumber') ? 'Plumber' : LABOR_CATEGORIES[0],
+  );
   const [department, setDepartment] = useState(DEPARTMENTS[0]);
   const [unit, setUnit] = useState<Unit>('People');
   const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
   const [drawer, setDrawer] = useState<Project | null>(null);
   const [modal, setModal] = useState<Modal>(null);
+  const [proposedProjectId, setProposedProjectId] = useState(
+    initial.config.proposedProjects[0]?.id ?? '',
+  );
+  const [proposedIntake, setProposedIntake] =
+    useState<ProposedProjectIntake | null>(null);
+  const [creatingProposedProject, setCreatingProposedProject] = useState(false);
+  const [softBacklogDraft, setSoftBacklogDraft] =
+    useState<SoftBacklogDraft | null>(null);
+  const [editingSoftBacklogId, setEditingSoftBacklogId] = useState<
+    string | null
+  >(null);
   const [actionDraft, setActionDraft] = useState<CapacityAction | null>(null);
   const [modalSnapshot, setModalSnapshot] = useState<ScenarioConfig | null>(
     null,
@@ -147,11 +198,14 @@ export function App() {
     }
   });
   const plan = plans.find((p) => p.id === planId) || plans[0];
-  const result = useMemo(() => analyze(live, category), [live, category]);
+  const result = useMemo(
+    () => analyze(live, category, department),
+    [live, category, department],
+  );
   const summary = useMemo(() => metrics(result), [result]);
   const savedResult = useMemo(
-    () => analyze(saved, category),
-    [saved, category],
+    () => analyze(saved, category, department),
+    [saved, category, department],
   );
   const dirty = !same(live, saved);
   const assumptions = live.capacity[category];
@@ -164,8 +218,8 @@ export function App() {
     );
 
   useEffect(() => {
-    savePlans(plans);
-  }, [plans]);
+    if (!sourceChanged && runtimeData.mode !== 'uploaded') savePlans(plans);
+  }, [plans, sourceChanged, runtimeData.mode]);
   useEffect(() => {
     if (!toast) return;
     const id = setTimeout(() => setToast(''), 3500);
@@ -198,7 +252,11 @@ export function App() {
     );
     setSaved(clone(live));
     setUndo([]);
-    setToast(`“${plan.name}” saved.`);
+    setToast(
+      runtimeData.mode === 'uploaded'
+        ? `“${plan.name}” saved for this session.`
+        : `“${plan.name}” saved.`,
+    );
   };
   const saveAsNewPlan = (name: string) => {
     const id = `plan-${Date.now()}`;
@@ -219,9 +277,140 @@ export function App() {
     setUndo([]);
     setToast(`“${name}” created.`);
   };
-  const openProposed = () => {
+  const openProposed = (id?: string) => {
+    const nextId = id ?? live.proposedProjects[0]?.id;
+    if (!nextId) return;
+    setProposedProjectId(nextId);
+    setCreatingProposedProject(false);
     setModalSnapshot(clone(live));
     setModal('proposed');
+  };
+  const openProposedIntake = () => {
+    const archetype = PROPOSED_PROJECT_ARCHETYPES[0];
+    const startIndex = Math.min(3, MONTHS.length - 1);
+    setProposedIntake({
+      name: '',
+      department,
+      archetypeId: archetype?.id ?? '',
+      value: 0,
+      startIndex,
+      endIndex: Math.min(
+        MONTHS.length - 1,
+        startIndex + (archetype?.defaultDurationMonths ?? 6) - 1,
+      ),
+      probability: 50,
+    });
+    setModal('proposed-intake');
+  };
+  const continueProposedIntake = (intake: ProposedProjectIntake) => {
+    const archetype = PROPOSED_PROJECT_ARCHETYPES.find(
+      (item) => item.id === intake.archetypeId,
+    );
+    if (!archetype) return;
+    const baseId =
+      intake.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '') || 'proposed-project';
+    let projectId = baseId;
+    let suffix = 2;
+    const usedIds = new Set(live.proposedProjects.map((item) => item.id));
+    while (usedIds.has(projectId)) projectId = `${baseId}-${suffix++}`;
+    const template = live.proposedProjects.find(
+      (item) => item.projectType === archetype.projectType,
+    );
+    const project = createProposedProject(
+      intake,
+      archetype,
+      template,
+      LABOR_CATEGORIES,
+      projectId,
+      MONTHS.length,
+    );
+    setModalSnapshot(clone(live));
+    setLive((config) => ({
+      ...config,
+      proposedProjects: [...config.proposedProjects, project],
+      proposedIncluded: {
+        ...config.proposedIncluded,
+        [project.id]: true,
+      },
+    }));
+    setProposedProjectId(project.id);
+    setProposedIntake(null);
+    setCreatingProposedProject(true);
+    setModal('proposed');
+  };
+  const openManualSoftBacklog = () => {
+    setEditingSoftBacklogId(null);
+    setSoftBacklogDraft(blankSoftBacklogDraft(department));
+    setModal('soft-backlog');
+  };
+  const editSoftBacklog = (project: Project) => {
+    setDrawer(null);
+    setEditingSoftBacklogId(project.id);
+    setSoftBacklogDraft(editSoftBacklogDraft(project));
+    setModal('soft-backlog');
+  };
+  const saveSoftBacklog = (draft: SoftBacklogDraft) => {
+    const project = clone({
+      ...draft.project,
+      softBacklogForecast: draft.forecastSetup,
+    });
+    if (!project.primaryLabor) {
+      project.primaryLabor =
+        Object.entries(project.laborAllocation).sort(
+          (a, b) => (b[1] ?? 0) - (a[1] ?? 0),
+        )[0]?.[0] ?? 'Unspecified';
+    }
+    if (editingSoftBacklogId) {
+      updateRuntimeProject(editingSoftBacklogId, project);
+    } else {
+      addRuntimeProject(project);
+    }
+    mutate((config) => {
+      config.included[project.id] = true;
+      config.probabilities[project.id] = project.planningProbability;
+      config.shifts[project.id] = editingSoftBacklogId
+        ? (config.shifts[project.id] ?? 0)
+        : 0;
+    });
+    const wasEditing = Boolean(editingSoftBacklogId);
+    setEditingSoftBacklogId(null);
+    setSoftBacklogDraft(null);
+    setModal(null);
+    setTab('projects');
+    setToast(
+      wasEditing
+        ? `“${project.name}” updated in Soft Backlog.`
+        : `“${project.name}” added to Soft Backlog.`,
+    );
+  };
+  const exportDataset = () => {
+    const data = getActivePlannerData();
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    data.publishedAt = now.toISOString();
+    data.source.softBacklogAsOf = date;
+    data.source.notes = [
+      data.source.notes,
+      'Soft Backlog and workforce-plan changes exported from a session-only app.',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    data.initialPlans = plans.map((item) =>
+      item.id === planId ? { ...item, config: clone(live) } : clone(item),
+    );
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `workforce-planner-${date}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setToast('Updated dataset downloaded.');
   };
   const openNewAction = (kind: CapacityAction['kind']) => {
     const draft: CapacityAction = {
@@ -230,7 +419,7 @@ export function App() {
       category,
       quantity: kind === 'overtime' ? 1 : 2,
       fromIndex: Math.max(0, summary.firstIndex),
-      toIndex: Math.min(17, Math.max(0, summary.firstIndex) + 3),
+      toIndex: Math.min(MONTHS.length - 1, Math.max(0, summary.firstIndex) + 3),
       status: 'Proposed',
       confirmed: false,
       notes: 'Added in scenario preview.',
@@ -270,11 +459,55 @@ export function App() {
           <span />
           WORKFORCE PLANNER
         </div>
-        <div className="sample" data-tour="banner">
+        <div className="sample" data-tour="banner" title={runtimeData.warning}>
           <i />
-          PROTOTYPE — SAMPLE DATA ONLY
+          {runtimeData.mode === 'published'
+            ? `PUBLISHED DATA — ${new Date(runtimeData.publishedAt).toLocaleDateString('en-US')}`
+            : runtimeData.mode === 'uploaded'
+              ? 'SESSION DATA — NOT SAVED'
+              : runtimeData.mode === 'development-fallback'
+                ? 'DEVELOPMENT — SAMPLE DATA FALLBACK'
+                : 'PROTOTYPE — SAMPLE DATA ONLY'}
         </div>
       </div>
+      {sourceChanged && (
+        <div className="source-update-notice" role="status">
+          <div>
+            <strong>New published source data is available.</strong>
+            <span>
+              Your working plans were created from an older Hard or Soft Backlog
+              and have not been combined with the new forecast.
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              const next = resetPlans();
+              setPlans(next);
+              const preferred = next.find((p) => p.id === 'growth') || next[0];
+              setPlanId(preferred.id);
+              setSaved(clone(preferred.config));
+              setLive(clone(preferred.config));
+              setUndo([]);
+              setSourceChanged(false);
+            }}
+          >
+            RELOAD PUBLISHED PLAN
+          </button>
+        </div>
+      )}
+      {!sourceChanged &&
+        runtimeData.mode === 'published' &&
+        runtimeData.stale && (
+          <div className="source-update-notice stale-source" role="status">
+            <div>
+              <strong>Published Hard Backlog is more than 45 days old.</strong>
+              <span>
+                Source date: {runtimeData.hardBacklogAsOf}. Confirm the monthly
+                BuildOps refresh before relying on hiring decisions.
+              </span>
+            </div>
+          </div>
+        )}
       <header className="page-header">
         <div>
           <h1>{tab === 'help' ? 'Help & Pilot Guide' : 'Workforce Planner'}</h1>
@@ -297,10 +530,18 @@ export function App() {
           >
             COMPARE PLANS
           </button>
+          {runtimeData.mode === 'uploaded' && (
+            <button
+              onClick={exportDataset}
+              title="Download this session's data"
+            >
+              <Download size={14} /> EXPORT DATASET
+            </button>
+          )}
           <div className="quick-actions" data-tour="quick-add">
             <CapacityActionMenu onSelect={openNewAction} />
-            <button className="primary" onClick={openProposed}>
-              ADD PROPOSED PROJECT
+            <button className="primary" onClick={() => setModal('add-project')}>
+              ADD PROJECT
             </button>
           </div>
         </div>
@@ -354,6 +595,7 @@ export function App() {
             setSelectedMonth={setSelectedMonth}
             plan={plan}
             category={category}
+            department={department}
             actions={live.actions}
             dirty={dirty}
             savedScenario={savedResult.scenario}
@@ -362,10 +604,14 @@ export function App() {
         {tab === 'projects' && (
           <Projects
             config={live}
+            department={department}
+            category={category}
+            result={result}
             mutate={mutate}
             display={display}
             drawer={drawer}
             setDrawer={setDrawer}
+            editSoftBacklog={editSoftBacklog}
             openProposed={openProposed}
             setTab={setTab}
             setSelectedMonth={setSelectedMonth}
@@ -379,6 +625,7 @@ export function App() {
             planId={planId}
             choosePlan={choosePlan}
             config={live}
+            department={department}
             mutate={mutate}
             result={result}
             summary={summary}
@@ -430,15 +677,60 @@ export function App() {
           close={() => setDrawer(null)}
         />
       )}
+      {modal === 'add-project' && (
+        <AddProjectModal
+          department={department}
+          close={() => setModal(null)}
+          manual={openManualSoftBacklog}
+          proposed={() => {
+            openProposedIntake();
+          }}
+          imported={(draft) => {
+            setEditingSoftBacklogId(null);
+            setSoftBacklogDraft(draft);
+            setModal('soft-backlog');
+          }}
+        />
+      )}
+      {modal === 'soft-backlog' && softBacklogDraft && (
+        <SoftBacklogModal
+          draft={softBacklogDraft}
+          setDraft={setSoftBacklogDraft}
+          existingProjectIds={PROJECTS.map((project) => project.id)}
+          editingProjectId={editingSoftBacklogId}
+          close={() => {
+            setEditingSoftBacklogId(null);
+            setSoftBacklogDraft(null);
+            setModal(null);
+          }}
+          save={saveSoftBacklog}
+        />
+      )}
+      {modal === 'proposed-intake' && proposedIntake && (
+        <ProposedIntakeModal
+          draft={proposedIntake}
+          setDraft={setProposedIntake}
+          close={() => {
+            setProposedIntake(null);
+            setModal(null);
+          }}
+          next={continueProposedIntake}
+        />
+      )}
       {modal === 'proposed' && (
         <ProposedModal
           config={live}
+          projectId={proposedProjectId}
           setLive={setLive}
           result={result}
           category={category}
           display={display}
+          isNew={creatingProposedProject}
           close={(discard) => {
             if (discard && modalSnapshot) setLive(modalSnapshot);
+            if (!discard && creatingProposedProject)
+              setToast('Proposed project added to the scenario.');
+            setCreatingProposedProject(false);
             setModal(null);
             setModalSnapshot(null);
           }}
@@ -460,6 +752,7 @@ export function App() {
         <CompareModal
           plans={plans.filter((p) => compareIds.includes(p.id))}
           category={category}
+          department={department}
           close={() => setModal(null)}
         />
       )}
@@ -614,16 +907,14 @@ function ControlBar(p: {
     <section className="controls">
       <Field
         label="DEPARTMENT"
-        hint="Only Mechanical — Metro is modeled in this prototype."
+        hint="Demand is filtered to the selected published department."
       >
         <select
           value={p.department}
           onChange={(e) => p.setDepartment(e.target.value)}
         >
-          {DEPARTMENTS.map((v, i) => (
-            <option key={v} disabled={i > 0}>
-              {i > 0 ? `${v} (reference only)` : v}
-            </option>
+          {DEPARTMENTS.map((v) => (
+            <option key={v}>{v}</option>
           ))}
         </select>
       </Field>
@@ -639,9 +930,13 @@ function ControlBar(p: {
       </Field>
       <Field
         label="PLANNING WINDOW"
-        hint="Fixed demonstration window for this prototype, not a live rolling forecast."
+        hint="Rolling 18-month window supplied by the published data."
       >
-        <input readOnly value="Sep 2026 — Feb 2028 · 18-month window" />
+        <input
+          readOnly
+          title={`${MONTHS[0]} — ${MONTHS[MONTHS.length - 1]} · ${MONTHS.length}-month window`}
+          value={`${MONTHS[0]} — ${MONTHS[MONTHS.length - 1]} · ${MONTHS.length}-month window`}
+        />
       </Field>
       <div className="unit-control" data-tour="unit-toggle">
         <span>VIEW AS</span>
@@ -658,7 +953,11 @@ function ControlBar(p: {
         </div>
       </div>
       <Field label="PLAN">
-        <select value={p.planId} onChange={(e) => p.choosePlan(e.target.value)}>
+        <select
+          value={p.planId}
+          title={p.plans.find((plan) => plan.id === p.planId)?.name}
+          onChange={(e) => p.choosePlan(e.target.value)}
+        >
           {p.plans
             .filter((x) => x.status !== 'Archived')
             .map((v) => (
@@ -725,6 +1024,7 @@ function Dashboard({
   setSelectedMonth,
   plan,
   category,
+  department,
   actions,
   dirty,
   savedScenario,
@@ -737,6 +1037,7 @@ function Dashboard({
   setSelectedMonth: (v: number | null) => void;
   plan: WorkforcePlan;
   category: LaborCategory;
+  department: string;
   actions: CapacityAction[];
   dirty: boolean;
   savedScenario: number[];
@@ -746,6 +1047,7 @@ function Dashboard({
     hard: result.hard[i],
     expected: result.expected[i],
     scenario: result.scenario[i],
+    prefab: result.prefab[i],
     existing: result.existing[i],
     confirmed: result.confirmedHires[i],
     planned: result.plannedHires[i],
@@ -838,7 +1140,7 @@ function Dashboard({
           <div>
             <span>DEMAND VERSUS EXECUTABLE CAPACITY</span>
             <h2>
-              {category} — Mechanical — Metro · {plan.name}
+              {category} — {department} · {plan.name}
             </h2>
           </div>
           <div className="chart-heading-controls">
@@ -943,12 +1245,15 @@ function Dashboard({
               <Tooltip
                 content={<PlannerTooltip result={result} display={display} />}
               />
-              <ReferenceLine
-                x="Sep 2026"
-                stroke="#161514"
-                strokeDasharray="3 3"
-                label={{ value: 'TODAY', position: 'top', fontSize: 9 }}
-              />
+              {MONTH_KEYS.includes(TODAY_MONTH_KEY) && (
+                <ReferenceLine
+                  x={MONTHS[MONTH_KEYS.indexOf(TODAY_MONTH_KEY)]}
+                  stroke="#161514"
+                  strokeDasharray="3 3"
+                  label={{ value: 'TODAY', position: 'top', fontSize: 9 }}
+                />
+              )}
+              <Bar dataKey="prefab" stackId="capacity" fill="#1f8a70" />
               <Bar dataKey="existing" stackId="capacity" fill="#8ac3ff" />
               <Bar dataKey="confirmed" stackId="capacity" fill="#009500" />
               <Bar
@@ -1001,6 +1306,7 @@ function Dashboard({
       </section>
       <MonthlyCompositionChart
         result={result}
+        display={display}
         selectedMonth={selectedMonth}
         setSelectedMonth={setSelectedMonth}
       />
@@ -1073,10 +1379,12 @@ function Dashboard({
 }
 function MonthlyCompositionChart({
   result,
+  display,
   selectedMonth,
   setSelectedMonth,
 }: {
   result: ReturnType<typeof analyze>;
+  display: (value: number) => string;
   selectedMonth: number | null;
   setSelectedMonth: (v: number | null) => void;
 }) {
@@ -1120,7 +1428,10 @@ function MonthlyCompositionChart({
               tick={{ fontSize: 9 }}
             />
             <YAxis tick={{ fontSize: 11 }} />
-            <Tooltip />
+            <Tooltip
+              formatter={(value) => display(Number(value))}
+              labelFormatter={(label) => String(label)}
+            />
             {selectedMonth !== null && (
               <ReferenceLine
                 x={MONTHS[selectedMonth]}
@@ -1156,6 +1467,7 @@ function ChartLegend() {
         <span className="line-scenario">Scenario workload</span>
       </div>
       <div className="legend-capacity">
+        <span className="sw-prefab">Prefab shop</span>
         <span className="sw-existing">Existing</span>
         <span className="sw-confirmed">Confirmed hires</span>
         <span className="sw-planned">Planned / unconfirmed</span>
@@ -1184,6 +1496,7 @@ function PlannerTooltip({
     ['Expected workload', result.expected[i], '#0068cc'],
     ['Proposed contribution', result.proposed[i], '#8e2da8'],
     ['Scenario workload', result.scenario[i], '#8e2da8', true],
+    ['Prefab shop', result.prefab[i], '#1f8a70'],
     ['Existing capacity', result.existing[i], '#8ac3ff'],
     ['Confirmed additions', result.confirmedHires[i], '#009500'],
     ['Planned / unconfirmed', result.unconfirmed[i], '#b8740b'],
@@ -1229,6 +1542,7 @@ function MonthDetail({
   close: () => void;
 }) {
   const rows = [
+    ['Prefab shop', result.prefab[index], '#1f8a70'],
     ['Existing internal', result.existing[index], '#8ac3ff'],
     ['Confirmed hires', result.confirmedHires[index], '#009500'],
     ['Planned hires', result.plannedHires[index], '#8acc8a'],
@@ -1398,23 +1712,37 @@ function Timeline({ actions }: { actions: CapacityAction[] }) {
 
 function Projects({
   config,
+  department,
+  category,
+  result,
   mutate,
   display,
   drawer,
   setDrawer,
+  editSoftBacklog,
   openProposed,
   setTab,
   setSelectedMonth,
 }: {
   config: ScenarioConfig;
+  department: string;
+  category: LaborCategory;
+  result: ReturnType<typeof analyze>;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
   display: (v: number) => string;
   drawer: Project | null;
   setDrawer: (p: Project | null) => void;
-  openProposed: () => void;
+  editSoftBacklog: (project: Project) => void;
+  openProposed: (id?: string) => void;
   setTab: (t: Tab) => void;
   setSelectedMonth: (v: number | null) => void;
 }) {
+  const visibleProjects = PROJECTS.filter(
+    (project) => project.department === department,
+  );
+  const visibleProposed = config.proposedProjects.filter(
+    (project) => project.department === department,
+  );
   return (
     <section className="screen-card">
       <div className="section-title">
@@ -1422,13 +1750,15 @@ function Projects({
           <span>PROJECT DEMAND INPUTS</span>
           <h2>Backlog and opportunity forecasts feeding this plan</h2>
           <p>
-            {PROJECTS.length} backlog projects · 1 proposed scenario project
+            {visibleProjects.length} backlog projects · {visibleProposed.length}{' '}
+            proposed scenario{' '}
+            {visibleProposed.length === 1 ? 'project' : 'projects'}
           </p>
         </div>
         <button
           onClick={() =>
             mutate((c) => {
-              PROJECTS.forEach((p) => {
+              visibleProjects.forEach((p) => {
                 c.probabilities[p.id] = p.planningProbability;
                 c.shifts[p.id] = 0;
                 c.included[p.id] = true;
@@ -1457,7 +1787,7 @@ function Projects({
             </tr>
           </thead>
           <tbody>
-            {PROJECTS.map((p) => {
+            {visibleProjects.map((p) => {
               const prob = config.probabilities[p.id] ?? p.planningProbability,
                 shift = config.shifts[p.id] || 0,
                 peak = Math.max(...p.curve);
@@ -1477,7 +1807,12 @@ function Projects({
                     />
                   </td>
                   <td>
-                    <button className="text-link" onClick={() => setDrawer(p)}>
+                    <button
+                      className="text-link"
+                      onClick={() =>
+                        p.type === 'Soft' ? editSoftBacklog(p) : setDrawer(p)
+                      }
+                    >
                       {p.name}
                     </button>
                     <small>
@@ -1564,7 +1899,10 @@ function Projects({
                       <span>
                         {
                           MONTHS[
-                            Math.max(0, Math.min(17, p.startIndex + shift))
+                            Math.max(
+                              0,
+                              Math.min(MONTHS.length - 1, p.startIndex + shift),
+                            )
                           ]
                         }
                       </span>
@@ -1609,44 +1947,56 @@ function Projects({
                 </tr>
               );
             })}
-            <tr className="proposed-row">
-              <td>
-                <CheckButton
-                  checked={config.proposedIncluded}
-                  onClick={() =>
-                    mutate((c) => {
-                      c.proposedIncluded = !c.proposedIncluded;
-                    })
-                  }
-                />
-              </td>
-              <td>
-                <button className="text-link magenta" onClick={openProposed}>
-                  {config.proposed.name}
-                </button>
-                <small>{config.proposed.department}</small>
-              </td>
-              <td>Proposed</td>
-              <td>${config.proposed.value.toFixed(1)}M</td>
-              <td>
-                <span className="muted">Not started</span>
-              </td>
-              <td>100% when included</td>
-              <td>Scenario only</td>
-              <td>{MONTHS[config.proposed.startIndex]}</td>
-              <td>{display(10)}</td>
-              <td>{config.proposed.staffingCurve}</td>
-              <td>
-                <button className="magenta-button" onClick={openProposed}>
-                  EDIT
-                </button>
-              </td>
-            </tr>
+            {visibleProposed.map((proposed) => (
+              <tr className="proposed-row" key={proposed.id}>
+                <td>
+                  <CheckButton
+                    checked={config.proposedIncluded[proposed.id] !== false}
+                    onClick={() =>
+                      mutate((c) => {
+                        c.proposedIncluded[proposed.id] =
+                          c.proposedIncluded[proposed.id] === false;
+                      })
+                    }
+                  />
+                </td>
+                <td>
+                  <button
+                    className="text-link magenta"
+                    onClick={() => openProposed(proposed.id)}
+                  >
+                    {proposed.name}
+                  </button>
+                  <small>{proposed.department}</small>
+                </td>
+                <td>Proposed</td>
+                <td>${proposed.value.toFixed(1)}M</td>
+                <td>
+                  <span className="muted">Not started</span>
+                </td>
+                <td>{proposed.probability}% when included</td>
+                <td>Scenario only</td>
+                <td>{MONTHS[proposed.startIndex]}</td>
+                <td>{display(10)}</td>
+                <td>{proposed.staffingCurve}</td>
+                <td>
+                  <button
+                    className="magenta-button"
+                    onClick={() => openProposed(proposed.id)}
+                  >
+                    EDIT
+                  </button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
       <PortfolioOverlap
         config={config}
+        department={department}
+        category={category}
+        result={result}
         setDrawer={setDrawer}
         setTab={setTab}
         setSelectedMonth={setSelectedMonth}
@@ -1657,17 +2007,25 @@ function Projects({
 }
 function PortfolioOverlap({
   config,
+  department,
+  category,
+  result,
   setDrawer,
   setTab,
   setSelectedMonth,
 }: {
   config: ScenarioConfig;
+  department: string;
+  category: LaborCategory;
+  result: ReturnType<typeof analyze>;
   setDrawer: (p: Project | null) => void;
   setTab: (t: Tab) => void;
   setSelectedMonth: (v: number | null) => void;
 }) {
   const [groupBy, setGroupBy] = useState<'trade' | 'location'>('trade');
-  const rows = PROJECTS.filter((p) => config.included[p.id] !== false)
+  const rows = PROJECTS.filter(
+    (p) => p.department === department && config.included[p.id] !== false,
+  )
     .map((p) => ({
       project: p,
       range: activeRange(rollupProjectCurve(p, config.packageIncluded)),
@@ -1685,6 +2043,23 @@ function PortfolioOverlap({
           }, {}),
         ).sort(([a], [b]) => a.localeCompare(b))
       : [['All projects', rows]];
+
+  // One status per month for the summary heatmap: whether that month's
+  // total demand for the selected labor category is covered by standing
+  // capacity — existing staff plus the pre-fab shop, neither of which needs
+  // a new decision — ('good'), only by also counting discretionary actions
+  // like planned hires, subcontract, or overtime ('watch'), or not at all
+  // ('critical').
+  const EPSILON = 0.05;
+  const monthlyStatus = MONTHS.map((_, i) => {
+    const need = result.scenario[i];
+    if (need <= EPSILON) return { need, status: 'none' as const };
+    if (need <= result.existing[i] + result.prefab[i] + EPSILON)
+      return { need, status: 'good' as const };
+    if (need <= result.total[i] + EPSILON)
+      return { need, status: 'watch' as const };
+    return { need, status: 'critical' as const };
+  });
 
   return (
     <section className="chart-card overlap-card" data-tour="overlap">
@@ -1765,12 +2140,45 @@ function PortfolioOverlap({
             ))}
           </div>
         ))}
+        <div className="overlap-group overlap-heat-group">
+          <div className="overlap-group-label">
+            {category.toUpperCase()} — MONTHLY LABOR NEEDED
+          </div>
+          <div className="overlap-row overlap-heat-row">
+            <div className="overlap-row-label">
+              <strong>Total {category.toLowerCase()} needed</strong>
+              <small>
+                Across every included project · change LABOR CATEGORY above
+              </small>
+            </div>
+            {monthlyStatus.map((m, i) => (
+              <div
+                key={MONTHS[i]}
+                className={`overlap-heat-cell status-${m.status}`}
+                style={{ gridColumnStart: i + 2, gridColumnEnd: i + 3 }}
+                title={`${MONTHS[i]}: ${m.need.toFixed(1)} ${category} needed`}
+              >
+                {m.need > 0.05 ? m.need.toFixed(1) : '—'}
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
       <p className="info-note">
         Bars span each project&apos;s active months with its peak crew labeled.
         Click a bar to open that project, or a month header to inspect that
         month on the bottleneck dashboard. This complements — it does not
         replace — the bottleneck chart there.
+      </p>
+      <p className="info-note heat-legend">
+        Heatmap: total {category.toLowerCase()} demand each month, colored by
+        how it&apos;s covered.
+        <span className="heat-legend-swatch status-good" />
+        Existing staff and/or the pre-fab shop
+        <span className="heat-legend-swatch status-watch" />
+        Needs planned hires, subcontract, or overtime
+        <span className="heat-legend-swatch status-critical" />
+        Unresolved gap
       </p>
     </section>
   );
@@ -2084,6 +2492,7 @@ function Scenario({
   planId,
   choosePlan,
   config,
+  department,
   mutate,
   result,
   summary,
@@ -2101,11 +2510,12 @@ function Scenario({
   planId: string;
   choosePlan: (id: string) => void;
   config: ScenarioConfig;
+  department: string;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
   result: ReturnType<typeof analyze>;
   summary: ReturnType<typeof metrics>;
   display: (v: number) => string;
-  openProposed: () => void;
+  openProposed: (id?: string) => void;
   openNewAction: (k: CapacityAction['kind']) => void;
   editAction: (a: CapacityAction) => void;
   save: () => void;
@@ -2147,7 +2557,9 @@ function Scenario({
           </div>
         )}
         {step === 2 &&
-          PROJECTS.filter((p) => p.type === 'Soft').map((p) => {
+          PROJECTS.filter(
+            (p) => p.type === 'Soft' && p.department === department,
+          ).map((p) => {
             const prob = config.probabilities[p.id] ?? p.planningProbability;
             return (
               <div className="soft-row" key={p.id}>
@@ -2190,33 +2602,44 @@ function Scenario({
             );
           })}
         {step === 3 && (
-          <div className="proposed-card">
-            <div>
-              <span>PROPOSED SCENARIO WORK</span>
-              <h3>{config.proposed.name}</h3>
-              <p>
-                ${config.proposed.value.toFixed(1)}M ·{' '}
-                {config.proposed.workPackages.length} work packages ·{' '}
-                {config.proposed.staffingCurve}
-              </p>
-            </div>
-            <b className={config.proposedIncluded ? 'success' : 'muted'}>
-              {config.proposedIncluded
-                ? 'Included in this scenario'
-                : 'Not included'}
-            </b>
-            <button
-              onClick={() =>
-                mutate((c) => {
-                  c.proposedIncluded = !c.proposedIncluded;
-                })
-              }
-            >
-              TOGGLE
-            </button>
-            <button className="magenta-button" onClick={openProposed}>
-              OPEN IMPACT MODEL
-            </button>
+          <div className="proposed-project-list">
+            {config.proposedProjects
+              .filter((proposed) => proposed.department === department)
+              .map((proposed) => {
+                const included = config.proposedIncluded[proposed.id] !== false;
+                return (
+                  <div className="proposed-card" key={proposed.id}>
+                    <div>
+                      <span>PROPOSED SCENARIO WORK</span>
+                      <h3>{proposed.name}</h3>
+                      <p>
+                        ${proposed.value.toFixed(1)}M ·{' '}
+                        {proposed.workPackages.length} work packages ·{' '}
+                        {proposed.staffingCurve}
+                      </p>
+                    </div>
+                    <b className={included ? 'success' : 'muted'}>
+                      {included ? 'Included in this scenario' : 'Not included'}
+                    </b>
+                    <button
+                      onClick={() =>
+                        mutate((c) => {
+                          c.proposedIncluded[proposed.id] =
+                            c.proposedIncluded[proposed.id] === false;
+                        })
+                      }
+                    >
+                      TOGGLE
+                    </button>
+                    <button
+                      className="magenta-button"
+                      onClick={() => openProposed(proposed.id)}
+                    >
+                      OPEN IMPACT MODEL
+                    </button>
+                  </div>
+                );
+              })}
           </div>
         )}
         {step === 4 && (
@@ -2409,13 +2832,17 @@ function Capacity({
   const selected = config.capacity[category];
   const fields: [keyof typeof selected, string][] = [
     ['headcount', 'Headcount'],
+    ['prefabCapacity', 'Prefab shop cap.'],
     ['productiveHours', 'Prod hrs/person/mo'],
     ['hourlyRate', 'Std cost/hour'],
     ['overtimeLimit', 'OT limit %'],
     ['recruitDays', 'Recruit days'],
+    ['interviewDays', 'Interview days'],
+    ['offerDays', 'Offer days'],
     ['onboardingDays', 'Onboard days'],
     ['rampDays', 'Ramp days'],
     ['subcontractSourceDays', 'Sub source days'],
+    ['subcontractVettingDays', 'Sub vetting days'],
     ['subcontractMobilizationDays', 'Sub mobilize days'],
     ['leavePercent', 'Leave %'],
     ['attritionPercent', 'Attrition %'],
@@ -2512,6 +2939,12 @@ function Capacity({
           detail="Department-owned workforce"
         />
         <Metric
+          label="PRE-FAB SHOP CAPACITY"
+          value={`${selected.prefabCapacity.toFixed(1)} FTE-equiv/mo`}
+          tone="prefab"
+          detail="Used first, before existing staff, hires, subcontract, or overtime."
+        />
+        <Metric
           label="EXECUTABLE CAPACITY"
           value={`${(selected.headcount * (1 - (selected.leavePercent + selected.attritionPercent) / 100)).toFixed(1)} FTE`}
           detail="After planned leave and attrition"
@@ -2600,20 +3033,23 @@ function Plans({
           <button onClick={openCompare}>COMPARE SELECTED PLANS</button>
           <button
             onClick={() => {
-              if (confirm('Reset all locally saved prototype plans?')) {
+              if (confirm('Reset all locally saved working plans?')) {
                 setPlans(resetPlans());
-                setToast('Prototype plans reset to fabricated defaults.');
+                setToast('Working plans reset to the published defaults.');
               }
             }}
           >
-            <RotateCcw size={14} /> RESET ALL PROTOTYPE DATA
+            <RotateCcw size={14} /> RESET WORKING PLANS
           </button>
         </div>
       </div>
       {toast && <div className="info-banner">{toast}</div>}
       <div className="plans-list">
         {plans.map((p) => {
-          const r = analyze(p.config, 'Plumber'),
+          const planCategory = LABOR_CATEGORIES.includes('Plumber')
+              ? 'Plumber'
+              : LABOR_CATEGORIES[0],
+            r = analyze(p.config, planCategory, p.department),
             m = metrics(r);
           return (
             <article
@@ -2796,6 +3232,7 @@ function Help({
   setTab: (t: Tab) => void;
   openProposed: () => void;
 }) {
+  const sessionOnly = getRuntimeDataInfo().mode === 'uploaded';
   const cards = [
     [
       '1',
@@ -2812,7 +3249,7 @@ function Help({
     [
       '3',
       'Test proposed work',
-      'Open the Atlas impact model. Change value, dates, labor mix, work packages, or self-perform strategy and see execution impact before adding it.',
+      'Open a proposed-project impact model. Change value, dates, labor mix, work packages, or self-perform strategy and see execution impact before adding it.',
       openProposed,
     ],
     [
@@ -2842,7 +3279,7 @@ function Help({
           <button className="primary" onClick={() => setTab('dashboard')}>
             START WITH THE DASHBOARD <ArrowRight />
           </button>
-          <button onClick={openProposed}>TRY A PROPOSED PROJECT</button>
+          <button onClick={() => openProposed()}>TRY A PROPOSED PROJECT</button>
         </div>
       </section>
       <section className="help-grid">
@@ -2894,23 +3331,29 @@ function Help({
         </section>
         <section>
           <span>IMPORTANT PILOT RULES</span>
-          <h2>What this prototype does—and does not do</h2>
+          <h2>What this planner does—and does not do</h2>
           <ul>
             <li>
-              All visible data is fabricated and safe for public demonstration.
+              The top banner identifies whether the app loaded published,
+              session-only, demonstration, or development-fallback data.
             </li>
             <li>
               Recommendations are transparent rules, not management decisions.
             </li>
             <li>Planned capacity remains distinct from confirmed capacity.</li>
-            <li>Plans are saved only in this browser on this device.</li>
             <li>
-              There are no uploads, integrations, employee schedules, or real
-              company data.
+              {sessionOnly
+                ? 'Uploaded data and plan changes last only for this page session.'
+                : 'Plans are saved only in this browser on this device.'}
             </li>
             <li>
-              Other departments reuse demonstration assumptions; Mechanical —
-              Metro is the complete example.
+              {sessionOnly
+                ? 'Refreshing or closing the page clears the workforce data.'
+                : 'Shared source data is published separately from browser-local working scenarios.'}
+            </li>
+            <li>
+              Labor categories, departments, and planning assumptions come from
+              the loaded data file.
             </li>
           </ul>
         </section>
@@ -2944,10 +3387,10 @@ function Help({
           </p>
         </details>
         <details>
-          <summary>Can I recover the original demonstration?</summary>
+          <summary>Can I recover the published starting plan?</summary>
           <p>
-            Yes. Saved Plans includes Reset All Prototype Data, which clears
-            local changes and restores the fabricated defaults.
+            Yes. Saved Plans includes Reset Working Plans, which clears local
+            changes and restores the current published defaults.
           </p>
         </details>
       </section>
@@ -2955,35 +3398,839 @@ function Help({
   );
 }
 
+function AddProjectModal({
+  department,
+  close,
+  manual,
+  proposed,
+  imported,
+}: {
+  department: string;
+  close: () => void;
+  manual: () => void;
+  proposed: () => void;
+  imported: (draft: SoftBacklogDraft) => void;
+}) {
+  const dialogRef = useDialogA11y<HTMLElement>(close);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const upload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setLoading(true);
+    setError('');
+    try {
+      imported(await parseEstimateFile(file, department));
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'The estimate could not be read.',
+      );
+      setLoading(false);
+      event.target.value = '';
+    }
+  };
+  return (
+    <div className="overlay">
+      <section
+        className="modal add-project-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add project"
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <span>ADD PROJECT</span>
+            <h2>What kind of planning input do you have?</h2>
+          </div>
+          <button onClick={close}>
+            <X /> Cancel
+          </button>
+        </header>
+        <div className="add-project-options">
+          <button onClick={manual}>
+            <Plus />
+            <strong>Enter Soft Backlog manually</strong>
+            <span>
+              Add an estimated project, cost mix, labor allocation, and monthly
+              staffing forecast.
+            </span>
+          </button>
+          <label className={loading ? 'loading' : ''}>
+            <Upload />
+            <strong>
+              {loading ? 'Reading estimate…' : 'Upload detailed estimate'}
+            </strong>
+            <span>
+              Parse the Upchurch Accubid/Trimble workbook, then review every
+              extracted value before adding it.
+            </span>
+            <input
+              type="file"
+              accept=".xlsx,.xls,.xlsm"
+              disabled={loading}
+              onChange={upload}
+            />
+          </label>
+          <button onClick={proposed}>
+            <ArrowRight />
+            <strong>Insert Proposed Project</strong>
+            <span>
+              Start with a basic opportunity and configurable rule-of-thumb
+              assumptions.
+            </span>
+          </button>
+        </div>
+        {error && (
+          <div className="data-import-error add-project-error" role="alert">
+            <strong>The estimate could not be imported.</strong>
+            <span>{error}</span>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function SoftBacklogModal({
+  draft,
+  setDraft,
+  existingProjectIds,
+  editingProjectId,
+  close,
+  save,
+}: {
+  draft: SoftBacklogDraft;
+  setDraft: React.Dispatch<React.SetStateAction<SoftBacklogDraft | null>>;
+  existingProjectIds: string[];
+  editingProjectId: string | null;
+  close: () => void;
+  save: (draft: SoftBacklogDraft) => void;
+}) {
+  const dialogRef = useDialogA11y<HTMLElement>(close);
+  const project = draft.project;
+  const forecastSetup = draft.forecastSetup ?? {
+    totalLaborHours: 0,
+    startMonth: MONTH_KEYS[Math.max(0, project.startIndex)] ?? MONTH_KEYS[0],
+    endMonth: MONTH_KEYS[Math.max(0, project.startIndex)] ?? MONTH_KEYS[0],
+    method: 'straight-line' as const,
+    productiveHoursPerFteMonth: 173,
+    generated: false,
+  };
+  const [forecastError, setForecastError] = useState('');
+  const update = <K extends keyof Project>(key: K, value: Project[K]) =>
+    setDraft((current) =>
+      current
+        ? { ...current, project: { ...current.project, [key]: value } }
+        : current,
+    );
+  const updateForecastSetup = (
+    patch: Partial<SoftBacklogDraft['forecastSetup']>,
+  ) =>
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            forecastSetup: {
+              ...(current.forecastSetup ?? forecastSetup),
+              ...patch,
+              generated: false,
+            },
+          }
+        : current,
+    );
+  const costTotal = Object.values(project.costMix).reduce(
+    (sum, value) => sum + value,
+    0,
+  );
+  const laborTotal = Object.values(project.laborAllocation).reduce<number>(
+    (sum, value) => sum + (value ?? 0),
+    0,
+  );
+  const issues = [
+    ...(!project.id.trim() ? ['Project number is required.'] : []),
+    ...(existingProjectIds.some(
+      (id) =>
+        id.toLowerCase() === project.id.trim().toLowerCase() &&
+        id !== editingProjectId,
+    )
+      ? ['That project number already exists.']
+      : []),
+    ...(!project.name.trim() ? ['Project name is required.'] : []),
+    ...(project.value <= 0
+      ? ['Contract value must be greater than zero.']
+      : []),
+    ...(Math.abs(costTotal - 100) > 0.01
+      ? ['Contract cost mix must total 100%.']
+      : []),
+    ...(Math.abs(laborTotal - 100) > 0.01
+      ? ['Internal labor allocation must total 100%.']
+      : []),
+    ...(!project.curve.some((value) => value > 0)
+      ? ['Enter staffing demand in at least one month.']
+      : []),
+  ];
+  return (
+    <div className="overlay">
+      <section
+        className="modal soft-backlog-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Review Soft Backlog project"
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <span>
+              {editingProjectId
+                ? 'SOFT BACKLOG — EDIT PROJECT'
+                : 'SOFT BACKLOG — REVIEW BEFORE ADDING'}
+            </span>
+            <h2>
+              {editingProjectId
+                ? 'Edit Soft Backlog project'
+                : draft.sourceFileName
+                  ? 'Review imported estimate'
+                  : 'Add Soft Backlog project'}
+            </h2>
+          </div>
+          <button onClick={close}>
+            <X /> Cancel
+          </button>
+        </header>
+        <div className="soft-backlog-body">
+          {draft.sourceFileName && !editingProjectId && (
+            <section className="estimate-import-summary">
+              <div>
+                <strong>{draft.sourceFileName}</strong>
+                <span>
+                  Extracted: {draft.extractedFields.join(', ') || 'No fields'}
+                </span>
+              </div>
+              <b>{draft.extractedFields.length} fields recognized</b>
+            </section>
+          )}
+          {draft.warnings.length > 0 && (
+            <section className="estimate-warnings">
+              <strong>Review these assumptions</strong>
+              {draft.warnings.map((warning) => (
+                <p key={warning}>{warning}</p>
+              ))}
+            </section>
+          )}
+          <section className="soft-form-section">
+            <h3>Project details</h3>
+            <div className="form-grid">
+              <Field label="PROJECT NUMBER">
+                <input
+                  value={project.id}
+                  disabled={Boolean(editingProjectId)}
+                  title={
+                    editingProjectId
+                      ? 'Project Number is the stable identifier and cannot be changed while editing.'
+                      : undefined
+                  }
+                  onChange={(event) =>
+                    update('id', event.target.value.trimStart())
+                  }
+                />
+              </Field>
+              <Field label="PROJECT NAME">
+                <input
+                  value={project.name}
+                  onChange={(event) => update('name', event.target.value)}
+                />
+              </Field>
+              <Field label="DEPARTMENT">
+                <select
+                  value={project.department}
+                  onChange={(event) => update('department', event.target.value)}
+                >
+                  {DEPARTMENTS.map((value) => (
+                    <option key={value}>{value}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="LOCATION">
+                <input
+                  value={project.location ?? ''}
+                  onChange={(event) => update('location', event.target.value)}
+                />
+              </Field>
+              <Field label="PROJECT TYPE">
+                <input
+                  value={project.projectType ?? ''}
+                  onChange={(event) =>
+                    update('projectType', event.target.value)
+                  }
+                />
+              </Field>
+              <Field label="BID DATE">
+                <input
+                  value={project.bidDate ?? ''}
+                  onChange={(event) => update('bidDate', event.target.value)}
+                />
+              </Field>
+              <Field label="CONTRACT VALUE ($M)">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={project.value}
+                  onChange={(event) =>
+                    update(
+                      'value',
+                      Math.round(Math.max(0, +event.target.value) * 100) / 100,
+                    )
+                  }
+                />
+              </Field>
+              <Field label="PLANNING PROBABILITY (%)">
+                <div className="percent-input">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={project.planningProbability}
+                    onChange={(event) => {
+                      const probability = Math.max(
+                        0,
+                        Math.min(100, Math.round(+event.target.value)),
+                      );
+                      setDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              project: {
+                                ...current.project,
+                                planningProbability: probability,
+                                sourceProbability: probability,
+                              },
+                            }
+                          : current,
+                      );
+                    }}
+                  />
+                  <span>%</span>
+                </div>
+              </Field>
+            </div>
+          </section>
+          <section className="soft-form-section">
+            <h3>Contract cost mix</h3>
+            <div className="form-grid four">
+              {Object.entries(project.costMix).map(([key, value]) => (
+                <Field
+                  key={key}
+                  label={`${key.replace(/[A-Z]/g, (m) => ` ${m}`).toUpperCase()} (%)`}
+                >
+                  <div className="percent-input">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={value}
+                      onChange={(event) =>
+                        update('costMix', {
+                          ...project.costMix,
+                          [key]:
+                            Math.round(Math.max(0, +event.target.value) * 10) /
+                            10,
+                        })
+                      }
+                    />
+                    <span>%</span>
+                  </div>
+                </Field>
+              ))}
+            </div>
+            <Validation total={costTotal} label="Cost mix" />
+          </section>
+          <section className="soft-form-section">
+            <h3>Internal labor allocation (% of internal labor hours)</h3>
+            <p className="section-copy">
+              These values are percentages, not hours or people. Together they
+              must equal 100%. They split the generated total FTE forecast into
+              the labor-category views.
+            </p>
+            <div className="labor-grid">
+              {LABOR_CATEGORIES.map((category) => (
+                <Field key={category} label={`${category.toUpperCase()} (%)`}>
+                  <div className="percent-input">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={project.laborAllocation[category] ?? 0}
+                      onChange={(event) =>
+                        update('laborAllocation', {
+                          ...project.laborAllocation,
+                          [category]:
+                            Math.round(Math.max(0, +event.target.value) * 10) /
+                            10,
+                        })
+                      }
+                    />
+                    <span>%</span>
+                  </div>
+                </Field>
+              ))}
+            </div>
+            <Validation total={laborTotal} label="Labor allocation" />
+          </section>
+          <section className="soft-form-section">
+            <div className="soft-forecast-heading">
+              <div>
+                <h3>
+                  {project.curveBasis === 'total-internal-labor'
+                    ? 'Monthly staffing forecast (total internal FTE people)'
+                    : 'Monthly staffing forecast (legacy labor-category FTE)'}
+                </h3>
+                <p>
+                  {project.curveBasis === 'total-internal-labor'
+                    ? 'Generate a starting curve from estimate hours, then adjust individual months if needed.'
+                    : 'This older curve keeps its original calculation basis when saved. Generating a new forecast converts it to total internal FTE.'}
+                </p>
+              </div>
+              <span>{project.method}</span>
+            </div>
+            <div className="forecast-generator">
+              <Field label="TOTAL LABOR HOURS">
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={Math.round(forecastSetup.totalLaborHours)}
+                  onChange={(event) =>
+                    updateForecastSetup({
+                      totalLaborHours: Math.round(
+                        Math.max(0, +event.target.value),
+                      ),
+                    })
+                  }
+                />
+              </Field>
+              <Field label="FORECAST START MONTH">
+                <input
+                  type="month"
+                  value={forecastSetup.startMonth}
+                  onChange={(event) =>
+                    updateForecastSetup({ startMonth: event.target.value })
+                  }
+                />
+              </Field>
+              <Field label="FORECAST END MONTH">
+                <input
+                  type="month"
+                  value={forecastSetup.endMonth}
+                  onChange={(event) =>
+                    updateForecastSetup({ endMonth: event.target.value })
+                  }
+                />
+              </Field>
+              <Field label="FORECAST METHOD">
+                <select
+                  value={forecastSetup.method}
+                  onChange={(event) =>
+                    updateForecastSetup({
+                      method: event.target.value as
+                        | 'straight-line'
+                        | 'bell-curve',
+                    })
+                  }
+                >
+                  <option value="straight-line">Straight-line</option>
+                  <option value="bell-curve">Bell curve</option>
+                </select>
+              </Field>
+              <Field label="PRODUCTIVE HOURS / FTE-MONTH">
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={forecastSetup.productiveHoursPerFteMonth}
+                  onChange={(event) =>
+                    updateForecastSetup({
+                      productiveHoursPerFteMonth: Math.round(
+                        Math.max(0, +event.target.value),
+                      ),
+                    })
+                  }
+                />
+              </Field>
+              <button
+                className="primary forecast-button"
+                onClick={() => {
+                  try {
+                    setDraft(
+                      generateSoftBacklogForecast({
+                        ...draft,
+                        forecastSetup,
+                      }),
+                    );
+                    setForecastError('');
+                  } catch (cause) {
+                    setForecastError(
+                      cause instanceof Error
+                        ? cause.message
+                        : 'The monthly forecast could not be generated.',
+                    );
+                  }
+                }}
+              >
+                GENERATE MONTHLY FORECAST
+              </button>
+            </div>
+            <p className="forecast-formula-note">
+              FTE people = labor hours ÷{' '}
+              {forecastSetup.productiveHoursPerFteMonth || 0} productive hours
+              per FTE-month. Straight-line spreads work evenly; Bell curve ramps
+              up, peaks near the middle, and tapers.
+            </p>
+            {forecastError && (
+              <p className="forecast-error" role="alert">
+                {forecastError}
+              </p>
+            )}
+            {!forecastSetup.generated &&
+              forecastSetup.totalLaborHours > 0 &&
+              !project.curve.some((value) => value > 0) && (
+                <p className="forecast-pending">
+                  Confirm the dates and method, then generate the monthly
+                  forecast.
+                </p>
+              )}
+            <div className="soft-monthly-grid">
+              {MONTHS.map((month, index) => (
+                <label key={month}>
+                  <span>{month}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={project.curve[index] ?? 0}
+                    onChange={(event) => {
+                      const curve = [...project.curve];
+                      curve[index] =
+                        Math.round(Math.max(0, +event.target.value) * 10) / 10;
+                      setDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              forecastSetup: {
+                                ...(current.forecastSetup ?? forecastSetup),
+                                generated: false,
+                              },
+                              project: {
+                                ...current.project,
+                                curve,
+                                method: 'Manual monthly forecast',
+                              },
+                            }
+                          : current,
+                      );
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          </section>
+        </div>
+        <footer className="soft-backlog-footer">
+          <div
+            className={
+              issues.length ? 'validation-box' : 'validation-box ready'
+            }
+          >
+            <strong>
+              {issues.length
+                ? editingProjectId
+                  ? 'Complete before saving'
+                  : 'Complete before adding'
+                : editingProjectId
+                  ? 'Ready to save'
+                  : 'Ready to add'}
+            </strong>
+            {issues.map((issue) => (
+              <p key={issue}>{issue}</p>
+            ))}
+          </div>
+          <div>
+            <button onClick={close}>CANCEL</button>
+            <button
+              className="primary"
+              disabled={issues.length > 0}
+              onClick={() =>
+                save({
+                  ...draft,
+                  project: { ...project, id: project.id.trim() },
+                })
+              }
+            >
+              {editingProjectId
+                ? 'SAVE SOFT BACKLOG CHANGES'
+                : 'ADD TO SOFT BACKLOG'}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function ProposedIntakeModal({
+  draft,
+  setDraft,
+  close,
+  next,
+}: {
+  draft: ProposedProjectIntake;
+  setDraft: React.Dispatch<React.SetStateAction<ProposedProjectIntake | null>>;
+  close: () => void;
+  next: (draft: ProposedProjectIntake) => void;
+}) {
+  const dialogRef = useDialogA11y<HTMLElement>(close);
+  const archetype = PROPOSED_PROJECT_ARCHETYPES.find(
+    (item) => item.id === draft.archetypeId,
+  );
+  const update = (patch: Partial<ProposedProjectIntake>) =>
+    setDraft((current) => (current ? { ...current, ...patch } : current));
+  const issues = [
+    ...(!draft.name.trim() ? ['Project name is required.'] : []),
+    ...(!archetype ? ['Choose a project type.'] : []),
+    ...(draft.value <= 0 ? ['Contract value must be greater than zero.'] : []),
+    ...(draft.endIndex < draft.startIndex
+      ? ['Expected completion must be on or after the start month.']
+      : []),
+  ];
+  return (
+    <div className="overlay">
+      <section
+        className="modal proposed-intake-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add Proposed Project"
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <span>ADD PROPOSED PROJECT — BASIC INFORMATION</span>
+            <h2>Describe the opportunity</h2>
+          </div>
+          <button onClick={close}>
+            <X /> Cancel
+          </button>
+        </header>
+        <div className="proposed-intake-body">
+          <p className="section-copy">
+            The selected project type supplies the initial cost, labor, and
+            staffing assumptions. You can review and change them on the next
+            screen.
+          </p>
+          <div className="form-grid">
+            <Field label="PROJECT NAME">
+              <input
+                autoFocus
+                value={draft.name}
+                onChange={(event) => update({ name: event.target.value })}
+              />
+            </Field>
+            <Field label="PROJECT TYPE / ASSUMPTION SET">
+              <select
+                value={draft.archetypeId}
+                onChange={(event) => {
+                  const nextArchetype = PROPOSED_PROJECT_ARCHETYPES.find(
+                    (item) => item.id === event.target.value,
+                  );
+                  update({
+                    archetypeId: event.target.value,
+                    endIndex: Math.min(
+                      MONTHS.length - 1,
+                      draft.startIndex +
+                        (nextArchetype?.defaultDurationMonths ?? 1) -
+                        1,
+                    ),
+                  });
+                }}
+              >
+                {PROPOSED_PROJECT_ARCHETYPES.length === 0 && (
+                  <option value="">No assumption sets available</option>
+                )}
+                {PROPOSED_PROJECT_ARCHETYPES.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="DEPARTMENT">
+              <select
+                value={draft.department}
+                onChange={(event) => update({ department: event.target.value })}
+              >
+                {DEPARTMENTS.map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="CONTRACT VALUE ($M)">
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={draft.value}
+                onChange={(event) =>
+                  update({
+                    value:
+                      Math.round(Math.max(0, +event.target.value) * 100) / 100,
+                  })
+                }
+              />
+            </Field>
+            <Field label="EXPECTED START">
+              <select
+                value={draft.startIndex}
+                onChange={(event) => {
+                  const startIndex = +event.target.value;
+                  const duration = draft.endIndex - draft.startIndex;
+                  update({
+                    startIndex,
+                    endIndex: Math.min(
+                      MONTHS.length - 1,
+                      startIndex + Math.max(0, duration),
+                    ),
+                  });
+                }}
+              >
+                {MONTHS.map((value, index) => (
+                  <option value={index} key={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="EXPECTED COMPLETION">
+              <select
+                value={draft.endIndex}
+                onChange={(event) => update({ endIndex: +event.target.value })}
+              >
+                {MONTHS.map((value, index) => (
+                  <option
+                    value={index}
+                    key={value}
+                    disabled={index < draft.startIndex}
+                  >
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="PLANNING PROBABILITY (%)">
+              <div className="percent-input">
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={draft.probability}
+                  onChange={(event) =>
+                    update({
+                      probability: Math.max(
+                        0,
+                        Math.min(100, Math.round(+event.target.value)),
+                      ),
+                    })
+                  }
+                />
+                <span>%</span>
+              </div>
+            </Field>
+          </div>
+          {archetype?.notes && (
+            <div className="estimate-warnings proposed-archetype-note">
+              <strong>About this assumption set</strong>
+              <p>{archetype.notes}</p>
+            </div>
+          )}
+        </div>
+        <footer className="soft-backlog-footer">
+          <div
+            className={
+              issues.length ? 'validation-box' : 'validation-box ready'
+            }
+          >
+            <strong>
+              {issues.length ? 'Complete before continuing' : 'Ready'}
+            </strong>
+            {issues.map((issue) => (
+              <p key={issue}>{issue}</p>
+            ))}
+          </div>
+          <div>
+            <button onClick={close}>CANCEL</button>
+            <button
+              className="primary"
+              disabled={issues.length > 0}
+              onClick={() => next(draft)}
+            >
+              BUILD INITIAL FORECAST
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function ProposedModal({
   config,
+  projectId,
   setLive,
   result,
   category,
   display,
+  isNew,
   close,
 }: {
   config: ScenarioConfig;
+  projectId: string;
   setLive: React.Dispatch<React.SetStateAction<ScenarioConfig>>;
   result: ReturnType<typeof analyze>;
   category: LaborCategory;
   display: (v: number) => string;
+  isNew: boolean;
   close: (discard: boolean) => void;
 }) {
-  const a = config.proposed,
-    issues = [
-      ...(Object.values(a.costMix).reduce((s, v) => s + v, 0) === 100
-        ? []
-        : ['Contract cost mix must total 100%.']),
-      ...(Object.values(a.laborAllocation).reduce((s, v) => s + v, 0) === 100
-        ? []
-        : ['Internal labor allocation must total 100%.']),
-      ...validateWorkPackages(a.workPackages),
-    ];
-  const update = <K extends keyof typeof a>(key: K, value: (typeof a)[K]) =>
-    setLive((c) => ({ ...c, proposed: { ...c.proposed, [key]: value } }));
-  const analysis = metrics(result);
+  const a =
+    config.proposedProjects.find((project) => project.id === projectId) ??
+    config.proposedProjects[0];
   const dialogRef = useDialogA11y<HTMLElement>(() => close(true));
+  if (!a) return null;
+  const issues = [
+    ...(!a.name.trim() ? ['Project name is required.'] : []),
+    ...(a.value <= 0 ? ['Contract value must be greater than zero.'] : []),
+    ...(Object.values(a.costMix).reduce((s, v) => s + v, 0) === 100
+      ? []
+      : ['Contract cost mix must total 100%.']),
+    ...(Object.values(a.laborAllocation).reduce((s, v) => s + v, 0) === 100
+      ? []
+      : ['Internal labor allocation must total 100%.']),
+    ...validateWorkPackages(a.workPackages),
+  ];
+  const update = <K extends keyof typeof a>(key: K, value: (typeof a)[K]) =>
+    setLive((c) => ({
+      ...c,
+      proposedProjects: c.proposedProjects.map((project) =>
+        project.id === a.id ? { ...project, [key]: value } : project,
+      ),
+    }));
+  const analysis = metrics(result);
   return (
     <div className="overlay">
       <section
@@ -3012,6 +4259,9 @@ function ProposedModal({
                   onChange={(e) => update('name', e.target.value)}
                 />
               </Field>
+              <Field label="PROJECT TYPE / ASSUMPTION SET">
+                <input readOnly value={a.projectType} />
+              </Field>
               <Field label="DEPARTMENT / LOCATION">
                 <select
                   value={a.department}
@@ -3026,9 +4276,13 @@ function ProposedModal({
                 <input
                   type="number"
                   min="0"
+                  step="0.01"
                   value={a.value}
                   onChange={(e) =>
-                    update('value', Math.max(0, +e.target.value))
+                    update(
+                      'value',
+                      Math.round(Math.max(0, +e.target.value) * 100) / 100,
+                    )
                   }
                 />
               </Field>
@@ -3049,25 +4303,42 @@ function ProposedModal({
                   type="number"
                   min="1"
                   max="36"
+                  step="1"
                   value={a.durationMonths}
                   onChange={(e) =>
-                    update('durationMonths', Math.max(1, +e.target.value))
+                    setLive((config) => ({
+                      ...config,
+                      proposedProjects: config.proposedProjects.map(
+                        (project) =>
+                          project.id === a.id
+                            ? resizeProposedProjectSchedule(
+                                project,
+                                +e.target.value,
+                                MONTHS.length,
+                              )
+                            : project,
+                      ),
+                    }))
                   }
                 />
               </Field>
-              <Field label="PROBABILITY">
-                <input
-                  type="number"
-                  min="0"
-                  max="100"
-                  value={a.probability}
-                  onChange={(e) =>
-                    update(
-                      'probability',
-                      Math.max(0, Math.min(100, +e.target.value)),
-                    )
-                  }
-                />
+              <Field label="PLANNING PROBABILITY (%)">
+                <div className="percent-input">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={a.probability}
+                    onChange={(e) =>
+                      update(
+                        'probability',
+                        Math.max(0, Math.min(100, Math.round(+e.target.value))),
+                      )
+                    }
+                  />
+                  <span>%</span>
+                </div>
               </Field>
             </div>
             <section>
@@ -3076,19 +4347,25 @@ function ProposedModal({
                 {Object.entries(a.costMix).map(([key, value]) => (
                   <Field
                     key={key}
-                    label={key.replace(/[A-Z]/g, (m) => ` ${m}`).toUpperCase()}
+                    label={`${key.replace(/[A-Z]/g, (m) => ` ${m}`).toUpperCase()} (%)`}
                   >
-                    <input
-                      type="number"
-                      min="0"
-                      value={value}
-                      onChange={(e) =>
-                        update('costMix', {
-                          ...a.costMix,
-                          [key]: Math.max(0, +e.target.value),
-                        })
-                      }
-                    />
+                    <div className="percent-input">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={value}
+                        onChange={(e) =>
+                          update('costMix', {
+                            ...a.costMix,
+                            [key]:
+                              Math.round(Math.max(0, +e.target.value) * 10) /
+                              10,
+                          })
+                        }
+                      />
+                      <span>%</span>
+                    </div>
                   </Field>
                 ))}
               </div>
@@ -3098,21 +4375,27 @@ function ProposedModal({
               />
             </section>
             <section>
-              <h3>Internal labor allocation</h3>
+              <h3>Internal labor allocation (% of internal labor hours)</h3>
               <div className="labor-grid">
                 {LABOR_CATEGORIES.map((cat) => (
-                  <Field key={cat} label={cat.toUpperCase()}>
-                    <input
-                      type="number"
-                      min="0"
-                      value={a.laborAllocation[cat]}
-                      onChange={(e) =>
-                        update('laborAllocation', {
-                          ...a.laborAllocation,
-                          [cat]: Math.max(0, +e.target.value),
-                        })
-                      }
-                    />
+                  <Field key={cat} label={`${cat.toUpperCase()} (%)`}>
+                    <div className="percent-input">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={a.laborAllocation[cat]}
+                        onChange={(e) =>
+                          update('laborAllocation', {
+                            ...a.laborAllocation,
+                            [cat]:
+                              Math.round(Math.max(0, +e.target.value) * 10) /
+                              10,
+                          })
+                        }
+                      />
+                      <span>%</span>
+                    </div>
                   </Field>
                 ))}
               </div>
@@ -3224,25 +4507,41 @@ function ProposedModal({
                 className="primary"
                 disabled={issues.length > 0}
                 onClick={() => {
-                  setLive((c) => ({ ...c, proposedIncluded: true }));
+                  setLive((c) => ({
+                    ...c,
+                    proposedIncluded: {
+                      ...c.proposedIncluded,
+                      [a.id]: true,
+                    },
+                  }));
                   close(false);
                 }}
               >
-                {config.proposedIncluded
-                  ? 'UPDATE IN SCENARIO'
-                  : 'ADD TO SCENARIO'}
+                {isNew
+                  ? 'ADD TO SCENARIO'
+                  : config.proposedIncluded[a.id] !== false
+                    ? 'UPDATE IN SCENARIO'
+                    : 'ADD TO SCENARIO'}
               </button>
-              <button
-                onClick={() =>
-                  setLive((c) => ({ ...c, proposedIncluded: false }))
-                }
-              >
-                REMOVE FROM SCENARIO
-              </button>
+              {!isNew && (
+                <button
+                  onClick={() =>
+                    setLive((c) => ({
+                      ...c,
+                      proposedIncluded: {
+                        ...c.proposedIncluded,
+                        [a.id]: false,
+                      },
+                    }))
+                  }
+                >
+                  REMOVE FROM SCENARIO
+                </button>
+              )}
             </div>
             <p className="fine-print">
-              Impacts are shown before the project is added. Recommendations
-              follow documented rules and are not a management decision.
+              The preview includes this project. Recommendations follow
+              documented rules and are not a management decision.
             </p>
           </aside>
         </div>
@@ -3418,7 +4717,15 @@ function WorkPackageEditor({
           <small>
             Manual monthly forecast — enter this package&apos;s own FTE for each
             month of its {item.durationMonths}-month duration, starting{' '}
-            {MONTHS[Math.min(17, item.startIndex + item.scenarioShift)]}.
+            {
+              MONTHS[
+                Math.min(
+                  MONTHS.length - 1,
+                  item.startIndex + item.scenarioShift,
+                )
+              ]
+            }
+            .
           </small>
           <div className="manual-forecast-grid">
             {Array.from({ length: item.durationMonths }, (_, k) => {
@@ -3761,10 +5068,12 @@ function ActionModal({
 function CompareModal({
   plans,
   category,
+  department,
   close,
 }: {
   plans: WorkforcePlan[];
   category: LaborCategory;
+  department: string;
   close: () => void;
 }) {
   const dialogRef = useDialogA11y<HTMLElement>(close);
@@ -3775,12 +5084,14 @@ function CompareModal({
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={`Plan comparison — ${category}, Mechanical — Metro`}
+        aria-label={`Plan comparison — ${category}, ${department}`}
         tabIndex={-1}
       >
         <header>
           <div>
-            <span>PLAN COMPARISON — {category}, MECHANICAL — METRO</span>
+            <span>
+              PLAN COMPARISON — {category}, {department}
+            </span>
             <h2>Compare execution risk and capacity commitments</h2>
           </div>
           <button onClick={close}>
@@ -3789,7 +5100,7 @@ function CompareModal({
         </header>
         <div className="compare-grid">
           {plans.map((p) => {
-            const r = analyze(p.config, category),
+            const r = analyze(p.config, category, department),
               m = metrics(r),
               cap = p.config.capacity[category],
               perm = p.config.actions
@@ -3832,9 +5143,12 @@ function CompareModal({
                   ],
                   [
                     'Proposed-project coverage',
-                    p.config.proposedIncluded
-                      ? 'Atlas included'
-                      : 'Atlas excluded',
+                    `${
+                      p.config.proposedProjects.filter(
+                        (project) =>
+                          p.config.proposedIncluded[project.id] !== false,
+                      ).length
+                    } of ${p.config.proposedProjects.length} included`,
                   ],
                   [
                     'Unconfirmed capacity',

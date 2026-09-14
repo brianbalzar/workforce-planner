@@ -1,4 +1,9 @@
-import { CATEGORY_FACTORS, MONTHS, PROJECTS } from '../data/sampleData';
+import {
+  CATEGORY_FACTORS,
+  MONTH_KEYS,
+  MONTHS,
+  PROJECTS,
+} from '../data/runtimeData';
 import type {
   AnalysisResult,
   AssumptionFlag,
@@ -123,42 +128,67 @@ export function rollupProjectCurve(
 export function proposedCurve(
   cfg: ScenarioConfig,
   category: LaborCategory,
+  department?: string,
 ): number[] {
-  const a = cfg.proposed;
   const out = zeros();
-  const globalShare =
-    (a.laborAllocation[category] || 0) /
-    (category === 'Plumber'
-      ? 85
-      : Math.max(1, CATEGORY_FACTORS[category] * 85));
-  if (globalShare <= 0) return out;
-  a.workPackages
-    .filter((w) => w.included)
-    .forEach((w) => {
-      const valueScale =
-        w.valuePercent / (defaultWpValues[w.id] || w.valuePercent || 1);
-      const selfScale =
-        w.selfPerformPercent / (w.baselineSelfPerformPercent || 100);
-      resolveWorkPackageCurve(w).forEach((v, i) => {
-        if (!v) return;
-        const target = i + (a.startIndex - 7);
-        if (target >= 0 && target < N)
-          out[target] +=
-            v *
-            (a.value / 10) *
-            (a.costMix.internalLabor / 35) *
-            (a.probability / 100) *
-            globalShare *
-            valueScale *
-            selfScale;
-      });
+  cfg.proposedProjects
+    .filter((project) => cfg.proposedIncluded[project.id] !== false)
+    .filter((project) => !department || project.department === department)
+    .forEach((a) => {
+      const baselineStart = a.workPackages.length
+        ? Math.min(
+            ...a.workPackages.map((workPackage) => workPackage.startIndex),
+          )
+        : a.startIndex;
+      const globalShare =
+        (a.laborAllocation[category] || 0) /
+        (category === 'Plumber'
+          ? 85
+          : Math.max(1, (CATEGORY_FACTORS[category] || 1) * 85));
+      if (globalShare <= 0) return;
+      a.workPackages
+        .filter((w) => w.included)
+        .forEach((w) => {
+          const valueScale =
+            w.valuePercent / (defaultWpValues[w.id] || w.valuePercent || 1);
+          const selfScale =
+            w.selfPerformPercent / (w.baselineSelfPerformPercent || 100);
+          resolveWorkPackageCurve(w).forEach((v, i) => {
+            if (!v) return;
+            const target = i + (a.startIndex - baselineStart);
+            if (target >= 0 && target < N)
+              out[target] +=
+                v *
+                (a.value / 10) *
+                (a.costMix.internalLabor / 35) *
+                (a.probability / 100) *
+                globalShare *
+                valueScale *
+                selfScale;
+          });
+        });
     });
   return out.map(round3);
+}
+
+export function proposedProjectCurve(
+  cfg: ScenarioConfig,
+  projectId: string,
+  category: LaborCategory,
+): number[] {
+  const included = cfg.proposedIncluded[projectId];
+  const isolated = {
+    ...cfg,
+    proposedProjects: cfg.proposedProjects.filter((p) => p.id === projectId),
+    proposedIncluded: { [projectId]: included },
+  };
+  return proposedCurve(isolated, category);
 }
 
 export function demand(
   cfg: ScenarioConfig,
   category: LaborCategory,
+  department?: string,
 ): DemandResult {
   const hard = zeros(),
     expected = zeros(),
@@ -167,10 +197,14 @@ export function demand(
       { length: N },
       () => [] as Array<{ name: string; type: string; fte: number }>,
     );
-  const factor = CATEGORY_FACTORS[category] || 1;
   PROJECTS.forEach((p) => {
+    if (department && p.department !== department) return;
     if (cfg.included[p.id] === false) return;
-    const source = rollupProjectCurve(p, cfg.packageIncluded),
+    const factor =
+        p.curveBasis === 'total-internal-labor'
+          ? (p.laborAllocation[category] ?? 0) / 100
+          : CATEGORY_FACTORS[category] || 1,
+      source = rollupProjectCurve(p, cfg.packageIncluded),
       shift = cfg.shifts[p.id] || 0,
       prob =
         p.type === 'Hard'
@@ -196,18 +230,22 @@ export function demand(
         });
     }
   });
-  const proposed = cfg.proposedIncluded
-    ? proposedCurve(cfg, category)
-    : zeros();
-  proposed.forEach((v, i) => {
-    scenario[i] += v;
-    if (v > 0.02)
-      drivers[i].push({
-        name: cfg.proposed.name,
-        type: 'Proposed scenario work',
-        fte: v,
+  const proposed = zeros();
+  cfg.proposedProjects
+    .filter((project) => cfg.proposedIncluded[project.id] !== false)
+    .filter((project) => !department || project.department === department)
+    .forEach((project) => {
+      proposedProjectCurve(cfg, project.id, category).forEach((v, i) => {
+        proposed[i] += v;
+        scenario[i] += v;
+        if (v > 0.02)
+          drivers[i].push({
+            name: project.name,
+            type: 'Proposed scenario work',
+            fte: v,
+          });
       });
-  });
+    });
   drivers.forEach((d) => d.sort((a, b) => b.fte - a.fte));
   return {
     hard: hard.map(round3),
@@ -228,8 +266,9 @@ export function hireRampFactors(
 export function analyze(
   cfg: ScenarioConfig,
   category: LaborCategory,
+  department?: string,
 ): AnalysisResult {
-  const d = demand(cfg, category),
+  const d = demand(cfg, category, department),
     existing = zeros(),
     confirmedHires = zeros(),
     plannedHires = zeros(),
@@ -280,7 +319,8 @@ export function analyze(
   const k = cfg.capacity[category],
     total = zeros(),
     gap = zeros(),
-    unconfirmed = zeros();
+    unconfirmed = zeros(),
+    prefab = zeros();
   for (let i = 0; i < N; i++) {
     existing[i] = Math.max(
       0,
@@ -288,7 +328,13 @@ export function analyze(
         leave[i] -
         departures[i],
     );
+    // The pre-fab shop is a first source: it offsets demand before any
+    // onsite capacity is counted. It never "banks" unused shop capacity —
+    // a month that needs less than the shop can produce only uses what it
+    // needs.
+    prefab[i] = Math.min(k.prefabCapacity, d.scenario[i]);
     total[i] =
+      prefab[i] +
       existing[i] +
       confirmedHires[i] +
       plannedHires[i] +
@@ -300,6 +346,7 @@ export function analyze(
   }
   return {
     ...d,
+    prefab,
     existing,
     confirmedHires,
     plannedHires,
@@ -330,6 +377,8 @@ export function metrics(r: AnalysisResult) {
     peakVsExistingMonth: MONTHS[peakVsExistingIndex],
     existingAtPeakVsExisting: r.existing[peakVsExistingIndex],
     subcontractPersonMonths: r.subcontract.reduce((s, v) => s + v, 0),
+    prefabPersonMonths: r.prefab.reduce((s, v) => s + v, 0),
+    prefabPeak: Math.max(...r.prefab),
     temporaryCapacityPeak: Math.max(...r.subcontract),
     overtimePeak: Math.max(...r.overtime),
     addedCapacityFteMonths:
@@ -361,7 +410,8 @@ export function formatValue(
 }
 
 export function monthStart(index: number) {
-  return new Date(Date.UTC(2026, 8 + index, 1));
+  const [year, month] = MONTH_KEYS[0].split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1 + index, 1));
 }
 export function subtractDays(date: Date, days: number) {
   const result = new Date(date);
@@ -570,7 +620,7 @@ export function validateWorkPackages(packages: WorkPackage[]) {
       issues.push(`${p.name}: self-perform and subcontract must total 100%.`);
     if (
       p.startIndex + p.scenarioShift < 0 ||
-      p.startIndex + p.scenarioShift >= 18
+      p.startIndex + p.scenarioShift >= MONTHS.length
     )
       issues.push(`${p.name}: start date is outside the planning window.`);
   });

@@ -28,13 +28,13 @@ export const TOUR_STEPS: TourStep[] = [
     tab: 'dashboard',
     selector: null,
     title: 'Welcome to the Workforce Planner',
-    body: 'This prototype runs entirely on fabricated sample data — nothing here is a real project, employee, or dollar figure, so feel free to click around. This short tour points out the main pieces of the app.',
+    body: 'This planner combines Hard and Soft Backlog with working scenario assumptions. The data-status banner always identifies whether you are viewing published, uploaded, or demonstration data.',
   },
   {
     tab: 'dashboard',
     selector: '[data-tour="banner"]',
-    title: 'Always sample data',
-    body: 'This banner is a permanent reminder: every number in this prototype is fabricated. It stays visible on every screen.',
+    title: 'Check the data status',
+    body: 'This banner identifies published data and its publication date, or clearly labels session-only, demonstration, and development-fallback data. It stays visible on every screen.',
     placement: 'bottom',
   },
   {
