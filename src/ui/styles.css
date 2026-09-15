@@ -2712,41 +2712,51 @@ td .muted {
   }
 }
 
-/* ---- Department picker ---- */
+/* ---- Department picker (design handoff §2/§7) ---- */
 .dept-picker-field {
-  min-width: 0;
-}
-.dept-picker {
+  min-width: 252px;
   position: relative;
 }
-.dept-picker > summary {
+.dept-picker-trigger {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   min-height: 34px;
   padding: 6px 9px;
   border: 1px solid var(--border-2);
   background: #fff;
   cursor: pointer;
-  list-style: none;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: normal;
 }
-.dept-picker > summary::-webkit-details-marker {
-  display: none;
-}
-.dept-picker[open] > summary {
-  border-color: #161514;
+.dept-picker-trigger:hover {
+  border-color: #161514 !important;
 }
 .dept-picker-trigger-text {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  gap: 1px;
+}
+.dept-picker-trigger-text strong {
+  font-size: 12.5px;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .dept-picker-trigger-text small {
   color: var(--fg-3);
   font-size: 10px;
+  margin-top: 1px;
 }
-.dept-picker-name,
+.dept-picker-caret {
+  font-size: 9px;
+  color: var(--fg-3);
+  flex-shrink: 0;
+}
 .dept-picker-name-bold {
   font-size: 12.5px;
   font-weight: 700;
@@ -2763,8 +2773,8 @@ td .muted {
 }
 .dept-picker-panel {
   position: absolute;
-  z-index: 5;
-  top: calc(100% + 4px);
+  z-index: 31;
+  top: calc(100% + 5px);
   left: 0;
   width: 400px;
   max-width: 92vw;
@@ -2800,12 +2810,12 @@ td .muted {
   overflow-y: auto;
 }
 .dept-picker-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 54px 46px;
   align-items: center;
   gap: 9px;
   padding: 9px 12px;
   border-bottom: 1px solid var(--border-1);
-  cursor: pointer;
 }
 .dept-picker-row:last-child {
   border-bottom: none;
@@ -2813,8 +2823,15 @@ td .muted {
 .dept-picker-row:hover {
   background: #f7faff;
 }
-.dept-picker-row-lead {
+.dept-picker-row.is-lead {
   background: #f7faff;
+}
+.dept-picker-row-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: pointer;
 }
 .dept-picker-row-text {
   flex: 1;
@@ -2831,17 +2848,7 @@ td .muted {
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-}
-.dept-picker-set {
-  border: 1px solid var(--border-2);
-  background: #fff;
-  padding: 3px 6px;
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-}
-.dept-picker-set:hover {
-  border-color: #161514;
+  text-align: right;
 }
 .dept-picker-lead-badge {
   font-size: 8.5px;
@@ -2850,6 +2857,7 @@ td .muted {
   color: #fff;
   background: #161514;
   padding: 3px 6px;
+  justify-self: end;
 }
 .dept-picker-footer {
   background: var(--bg-subtle);
@@ -2993,4 +3001,32 @@ td .muted {
 }
 .dept-compare-deadlines {
   margin-top: 16px;
+}
+
+/* ---- Shared picker primitives ---- */
+.drawn-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 1px solid #9c9a95;
+  background: #fff;
+}
+.drawn-checkbox.checked {
+  border-color: #0082ff;
+  background: #0082ff;
+}
+.set-button {
+  border: 1px solid var(--border-2);
+  background: #fff;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  padding: 3px 6px;
+  justify-self: end;
+}
+.set-button:hover {
+  border-color: #161514;
 }

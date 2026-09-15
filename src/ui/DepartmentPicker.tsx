@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import {
   departmentColor,
   departmentDivision,
@@ -20,6 +21,28 @@ const MODE_NOTE: Record<DepartmentMode, string> = {
   combine:
     "Selected departments are pooled into one demand and capacity view. Capacity above a department's own demand is not counted.",
 };
+
+function DrawnCheckbox({ checked }: { checked: boolean }) {
+  return (
+    <span
+      className={`drawn-checkbox${checked ? ' checked' : ''}`}
+      aria-hidden="true"
+    >
+      {checked && (
+        <svg width={10} height={8} viewBox="0 0 10 8">
+          <polyline
+            points="1,4 4,7 9,1"
+            fill="none"
+            stroke="#fff"
+            strokeWidth={1.6}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </span>
+  );
+}
 
 export function departmentPickerLabel(s: DepartmentSelectionState): string {
   if (s.deptMode === 'single') return departmentShortLabel(s.department);
@@ -56,28 +79,52 @@ export function DepartmentPicker({
   setMode: (mode: DepartmentMode) => void;
   projectCount: (department: string) => number;
 }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const list = selectedDepartments(selection);
   const multi = selection.deptMode !== 'single';
   const division = departmentDivision(departments);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node))
+        setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
   return (
-    <div className="field dept-picker-field">
+    <div className="field dept-picker-field" ref={rootRef}>
       <span className="field-label">DEPARTMENT</span>
-      <details className="dept-picker">
-        <summary
-          aria-label={`Department: ${departmentPickerLabel(selection)}. ${departmentPickerSubline(selection, projectCount)}`}
-        >
-          <span
-            className="dept-picker-dot"
-            style={{ background: departmentColor(0) }}
-            aria-hidden="true"
-          />
-          <span className="dept-picker-trigger-text">
-            <span className="dept-picker-name">
-              {departmentPickerLabel(selection)}
-            </span>
-            <small>{departmentPickerSubline(selection, projectCount)}</small>
-          </span>
-        </summary>
+      <button
+        type="button"
+        className="dept-picker-trigger"
+        aria-label={`Department: ${departmentPickerLabel(selection)}. ${departmentPickerSubline(selection, projectCount)}`}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span
+          className="dept-picker-dot"
+          style={{ background: departmentColor(0) }}
+          aria-hidden="true"
+        />
+        <span className="dept-picker-trigger-text">
+          <strong>{departmentPickerLabel(selection)}</strong>
+          <small>{departmentPickerSubline(selection, projectCount)}</small>
+        </span>
+        <span className="dept-picker-caret" aria-hidden="true">
+          ▼
+        </span>
+      </button>
+      {open && (
         <div className="dept-picker-panel">
           <div className="dept-picker-mode">
             <span className="field-label">DEPARTMENT VIEW</span>
@@ -101,7 +148,7 @@ export function DepartmentPicker({
               {MODE_NOTE[selection.deptMode]}
             </p>
           </div>
-          <div className="dept-picker-header">
+          <div className={`dept-picker-header${multi ? ' multi' : ''}`}>
             <span>{division ? `${division} DEPARTMENTS` : 'DEPARTMENTS'}</span>
             <span>PROJECTS IN PLAN</span>
           </div>
@@ -112,57 +159,58 @@ export function DepartmentPicker({
               const isSelected = list.includes(department);
               const on = multi ? isSelected : isLead;
               return (
-                <label
+                <div
                   key={department}
-                  className={`dept-picker-row${isLead ? ' dept-picker-row-lead' : ''}`}
+                  className={`dept-picker-row${multi ? ' multi' : ''}${isLead ? ' is-lead' : ''}`}
                 >
-                  {multi ? (
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      disabled={isSelected && list.length === 1}
-                      onChange={() => toggle(department)}
-                    />
-                  ) : (
-                    <input
-                      type="radio"
-                      name="dept-picker-single"
-                      checked={isLead}
-                      onChange={() => toggle(department)}
-                    />
-                  )}
-                  <span
-                    className="dept-picker-dot"
-                    style={{
-                      background: on
-                        ? departmentColor(list.indexOf(department))
-                        : n
-                          ? '#C9C7C2'
-                          : '#EFEEEC',
+                  <div
+                    className="dept-picker-row-toggle"
+                    role="checkbox"
+                    aria-checked={on}
+                    aria-label={department}
+                    tabIndex={0}
+                    onClick={() => toggle(department)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggle(department);
+                      }
                     }}
-                    aria-hidden="true"
-                  />
-                  <span className="dept-picker-row-text">
-                    <span className={isLead ? 'dept-picker-name-bold' : ''}>
-                      {departmentShortLabel(department)}
-                    </span>
-                    <small>
-                      {isLead
-                        ? multi
-                          ? `Lead department · ${n} ${n === 1 ? 'project' : 'projects'}`
-                          : 'Selected · hard and soft backlog published'
-                        : isSelected
-                          ? `In the comparison · ${n} ${n === 1 ? 'project' : 'projects'}`
+                  >
+                    {multi && <DrawnCheckbox checked={isSelected} />}
+                    <span
+                      className="dept-picker-dot"
+                      style={{
+                        background: on
+                          ? departmentColor(list.indexOf(department))
                           : n
-                            ? `${n} ${n === 1 ? 'project' : 'projects'} published`
-                            : 'No published export loaded yet'}
-                    </small>
-                  </span>
+                            ? '#C9C7C2'
+                            : '#EFEEEC',
+                      }}
+                      aria-hidden="true"
+                    />
+                    <span className="dept-picker-row-text">
+                      <span className={isLead ? 'dept-picker-name-bold' : ''}>
+                        {departmentShortLabel(department)}
+                      </span>
+                      <small>
+                        {isLead
+                          ? multi
+                            ? `Lead department · ${n} ${n === 1 ? 'project' : 'projects'}`
+                            : 'Selected · hard and soft backlog published'
+                          : isSelected
+                            ? `In the comparison · ${n} ${n === 1 ? 'project' : 'projects'}`
+                            : n
+                              ? `${n} ${n === 1 ? 'project' : 'projects'} published`
+                              : 'No published export loaded yet'}
+                      </small>
+                    </span>
+                  </div>
                   <span className="dept-picker-row-count">{n || '—'}</span>
                   {multi && isSelected && !isLead && (
                     <button
                       type="button"
-                      className="dept-picker-set"
+                      className="set-button"
                       onClick={() => promote(department)}
                     >
                       SET
@@ -171,7 +219,8 @@ export function DepartmentPicker({
                   {multi && isLead && (
                     <span className="dept-picker-lead-badge">LEAD</span>
                   )}
-                </label>
+                  {!multi && <span />}
+                </div>
               );
             })}
           </div>
@@ -180,7 +229,7 @@ export function DepartmentPicker({
             are modeled.
           </p>
         </div>
-      </details>
+      )}
     </div>
   );
 }
