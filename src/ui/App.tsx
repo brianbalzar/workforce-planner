@@ -52,6 +52,8 @@ import {
 import { LABOR_SOURCE_MAP } from '../data/sampleData';
 import {
   createProposedProject,
+  hasDriftedFromArchetype,
+  resetProposedProjectToArchetype,
   resizeProposedProjectSchedule,
   type ProposedProjectIntake,
 } from '../data/proposedProjectBuilder';
@@ -61,18 +63,22 @@ import type {
   LaborCategory,
   PlanStatus,
   Project,
+  ProposedProjectArchetype,
   ScenarioConfig,
   StaffingCurve,
   Unit,
   WorkforcePlan,
   WorkPackage,
 } from '../domain/types';
+import { comparableProjectCount, leadingTrades } from '../data/archetypeMeta';
 import {
   actionMilestones,
   actionStartDate,
   activeRange,
   analyze,
   assumptionFlagsForProject,
+  categoryUnitWeight,
+  combineWeightedResults,
   datePosition,
   forecastFreshness,
   formatDate,
@@ -86,6 +92,30 @@ import {
 } from '../planning/engine';
 import { loadPlanState, resetPlans, savePlans } from '../persistence/planStore';
 import { GuidedTour, TOUR_SEEN_KEY } from './GuidedTour';
+import { LaborCategoryPicker } from './LaborCategoryPicker';
+import { BottleneckHeatmap } from './BottleneckHeatmap';
+import { GapMatrixCard } from './GapMatrixCard';
+import { peakGap } from './categoryStatus';
+import {
+  promoteCategory,
+  selectEveryConstrained,
+  selectedCategories,
+  toggleCategory,
+  type CategorySelectionState,
+} from './categorySelection';
+import { DepartmentPicker } from './DepartmentPicker';
+import { DepartmentCompare } from './DepartmentCompare';
+import {
+  changeDeptMode,
+  departmentColor,
+  promoteDepartment,
+  selectedDepartments,
+  toggleDepartment,
+  type DepartmentMode,
+  type DepartmentSelectionState,
+} from './departmentSelection';
+import { BuildOpsRefreshModal } from './BuildOpsRefreshModal';
+import { CountTileStrip, TrustContractCards } from './ImportFlowShell';
 
 export type Tab =
   | 'dashboard'
@@ -101,7 +131,8 @@ type Modal =
   | 'proposed-intake'
   | 'proposed'
   | 'action'
-  | 'compare';
+  | 'compare'
+  | 'buildops-refresh';
 const TODAY = new Date();
 const TODAY_MONTH_KEY = `${TODAY.getFullYear()}-${String(TODAY.getMonth() + 1).padStart(2, '0')}`;
 const tabList: [Tab, string][] = [
@@ -122,7 +153,7 @@ const same = (a: unknown, b: unknown) =>
  * Escape. Combined with role="dialog"/aria-modal on the panel element this
  * covers REVIEW_RECOMMENDATIONS item 12.
  */
-function useDialogA11y<T extends HTMLElement>(onEscape: () => void) {
+export function useDialogA11y<T extends HTMLElement>(onEscape: () => void) {
   const ref = useRef<T>(null);
   const onEscapeRef = useRef(onEscape);
   // Keep the ref pointed at the latest callback from an effect (not render)
@@ -162,12 +193,47 @@ export function App() {
   const [live, setLive] = useState<ScenarioConfig>(() => clone(initial.config));
   const [undo, setUndo] = useState<ScenarioConfig[]>([]);
   const [tab, setTab] = useState<Tab>('dashboard');
-  const [category, setCategory] = useState<LaborCategory>(
+  const [category, setCategoryState] = useState<LaborCategory>(
     LABOR_CATEGORIES.includes('Plumber') ? 'Plumber' : LABOR_CATEGORIES[0],
   );
+  const [extra, setExtra] = useState<LaborCategory[]>([]);
+  const [catView, setCatView] = useState<'combined' | 'primary'>('combined');
+  const categorySelection: CategorySelectionState = { category, extra };
   const [department, setDepartment] = useState(DEPARTMENTS[0]);
+  const [deptMode, setDeptMode] = useState<DepartmentMode>('single');
+  const [cmpDeptList, setCmpDeptList] = useState<string[]>([]);
   const [unit, setUnit] = useState<Unit>('People');
   const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
+  const departmentSelection: DepartmentSelectionState = {
+    department,
+    cmpDeptList,
+    deptMode,
+  };
+  // `cmpDeptList` only changes reference when actually updated (React keeps
+  // unrelated re-renders stable), so this is safe to memoize on the raw
+  // state values directly.
+  const allSelectedDepartments = useMemo(
+    () => selectedDepartments({ department, cmpDeptList, deptMode }),
+    [department, cmpDeptList, deptMode],
+  );
+  const toggleDept = (d: string) => {
+    const next = toggleDepartment(departmentSelection, d);
+    setDepartment(next.department);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
+  const promoteDept = (d: string) => {
+    const next = promoteDepartment(departmentSelection, d);
+    setDepartment(next.department);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
+  const setDeptModeChecked = (mode: DepartmentMode) => {
+    const next = changeDeptMode(departmentSelection, mode, DEPARTMENTS);
+    setDeptMode(next.deptMode);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
   const [drawer, setDrawer] = useState<Project | null>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [proposedProjectId, setProposedProjectId] = useState(
@@ -181,6 +247,7 @@ export function App() {
   const [editingSoftBacklogId, setEditingSoftBacklogId] = useState<
     string | null
   >(null);
+  const [refreshProject, setRefreshProject] = useState<Project | null>(null);
   const [actionDraft, setActionDraft] = useState<CapacityAction | null>(null);
   const [modalSnapshot, setModalSnapshot] = useState<ScenarioConfig | null>(
     null,
@@ -198,11 +265,62 @@ export function App() {
     }
   });
   const plan = plans.find((p) => p.id === planId) || plans[0];
-  const result = useMemo(
-    () => analyze(live, category, department),
-    [live, category, department],
+  // Every category's analyze() result, computed once here rather than per
+  // component, so the picker widget, gap-matrix and heatmap never recompute
+  // what another already has.
+  const allCategoryResults = useMemo(
+    () =>
+      new Map(
+        LABOR_CATEGORIES.map((cat) => [cat, analyze(live, cat, department)]),
+      ),
+    [live, department],
   );
-  const summary = useMemo(() => metrics(result), [result]);
+  const result =
+    allCategoryResults.get(category) ?? analyze(live, category, department);
+  const summary = metrics(result);
+  const setCategory = (c: LaborCategory) => {
+    setCategoryState(c);
+    setExtra([]);
+    setSelectedMonth(null);
+  };
+  const toggleCat = (c: LaborCategory) => {
+    const next = toggleCategory(categorySelection, c);
+    if (next.extra.length > extra.length) setCatView('combined');
+    setCategoryState(next.category);
+    setExtra(next.extra);
+    setSelectedMonth(null);
+  };
+  const promoteCat = (c: LaborCategory) => {
+    const next = promoteCategory(categorySelection, c);
+    setCategoryState(next.category);
+    setExtra(next.extra);
+    setSelectedMonth(null);
+  };
+  const primaryOnlyCat = () => {
+    setExtra([]);
+    setSelectedMonth(null);
+  };
+  const selectEveryConstrainedCat = () => {
+    const next = selectEveryConstrained(
+      categorySelection,
+      LABOR_CATEGORIES,
+      (c) => peakGap(allCategoryResults.get(c)!).peak,
+    );
+    setCatView('combined');
+    setCategoryState(next.category);
+    setExtra(next.extra);
+    setSelectedMonth(null);
+  };
+  // Heatmap click-through: sets the clicked category as primary, moves the
+  // previous primary into the comparison set (capped at 4 extras beyond the
+  // new primary), and optionally jumps straight to a month.
+  const categoryClickThrough = (c: LaborCategory, monthIndex?: number) => {
+    const next = promoteCategory(categorySelection, c);
+    setCategoryState(next.category);
+    setExtra(next.extra.slice(0, 4));
+    setSelectedMonth(monthIndex ?? null);
+    setTab('dashboard');
+  };
   const savedResult = useMemo(
     () => analyze(saved, category, department),
     [saved, category, department],
@@ -216,6 +334,45 @@ export function App() {
       assumptions.productiveHours,
       assumptions.hourlyRate,
     );
+  // §3/§7 combined mode: categories combine when 2+ are selected and the
+  // user hasn't switched to "primary only"; departments combine in Combine
+  // mode with 2+ selected. Either can be active on its own, or both at
+  // once — when both are, the pooled result is built over the cross
+  // product of selected categories × selected departments, matching the
+  // design prototype's own sumSeries(pairs) reference logic. This drives
+  // the demand chart, its tooltip and month-detail only — metric tiles,
+  // recommendations and the workflow timeline always follow the primary
+  // category and lead department's own `result` above.
+  const combinedCategories = extra.length > 0 && catView !== 'primary';
+  const combinedDepartments =
+    deptMode === 'combine' && allSelectedDepartments.length > 1;
+  const combined = combinedCategories || combinedDepartments;
+  const chartResult = useMemo(() => {
+    if (!combined) return result;
+    const cats = combinedCategories
+      ? selectedCategories({ category, extra })
+      : [category];
+    const depts = combinedDepartments ? allSelectedDepartments : [department];
+    const primaryAssumption = live.capacity[category];
+    const entries = cats.flatMap((c) =>
+      depts.map((d) => ({
+        result: analyze(live, c, d),
+        weight: categoryUnitWeight(unit, primaryAssumption, live.capacity[c]),
+      })),
+    );
+    return combineWeightedResults(entries);
+  }, [
+    combined,
+    combinedCategories,
+    combinedDepartments,
+    category,
+    extra,
+    allSelectedDepartments,
+    department,
+    live,
+    unit,
+    result,
+  ]);
 
   useEffect(() => {
     if (!sourceChanged && runtimeData.mode !== 'uploaded') savePlans(plans);
@@ -385,6 +542,21 @@ export function App() {
         ? `“${project.name}” updated in Soft Backlog.`
         : `“${project.name}” added to Soft Backlog.`,
     );
+  };
+  const openBuildOpsRefresh = (target: Project) => {
+    setDrawer(null);
+    setRefreshProject(target);
+    setModal('buildops-refresh');
+  };
+  const commitBuildOpsRefresh = (refreshed: Project) => {
+    const isNew = !PROJECTS.some((p) => p.id === refreshed.id);
+    if (isNew) addRuntimeProject(refreshed);
+    else updateRuntimeProject(refreshed.id, refreshed);
+    mutate((config) => {
+      config.included[refreshed.id] = true;
+      config.probabilities[refreshed.id] = refreshed.planningProbability;
+    });
+    setToast(`“${refreshed.name}” refreshed from BuildOps.`);
   };
   const exportDataset = () => {
     const data = getActivePlannerData();
@@ -560,10 +732,17 @@ export function App() {
       </nav>
       {['dashboard', 'projects', 'scenario'].includes(tab) && (
         <ControlBar
-          department={department}
-          setDepartment={setDepartment}
-          category={category}
-          setCategory={setCategory}
+          departmentSelection={departmentSelection}
+          toggleDept={toggleDept}
+          promoteDept={promoteDept}
+          setDeptMode={setDeptModeChecked}
+          categorySelection={categorySelection}
+          toggleCat={toggleCat}
+          promoteCat={promoteCat}
+          selectEveryConstrainedCat={selectEveryConstrainedCat}
+          primaryOnlyCat={primaryOnlyCat}
+          allCategoryResults={allCategoryResults}
+          display={display}
           unit={unit}
           setUnit={setUnit}
           plans={plans}
@@ -585,26 +764,56 @@ export function App() {
         />
       )}
       <main className={tab === 'help' ? 'help-main' : ''}>
-        {tab === 'dashboard' && (
-          <Dashboard
-            result={result}
-            summary={summary}
-            display={display}
-            unit={unit}
-            selectedMonth={selectedMonth}
-            setSelectedMonth={setSelectedMonth}
-            plan={plan}
-            category={category}
-            department={department}
-            actions={live.actions}
-            dirty={dirty}
-            savedScenario={savedResult.scenario}
-          />
-        )}
+        {tab === 'dashboard' &&
+          (deptMode === 'compare' && allSelectedDepartments.length > 1 ? (
+            <DepartmentCompare
+              departments={allSelectedDepartments}
+              category={category}
+              config={live}
+              plan={plan}
+              display={display}
+              focusDepartment={(d) => {
+                setDeptMode('single');
+                setDepartment(d);
+                setCmpDeptList([]);
+                setSelectedMonth(null);
+              }}
+            />
+          ) : (
+            <Dashboard
+              result={result}
+              chartResult={chartResult}
+              combined={combined}
+              combinedCategories={combinedCategories}
+              combinedDepartments={combinedDepartments}
+              departmentCount={allSelectedDepartments.length}
+              catView={catView}
+              setCatView={setCatView}
+              summary={summary}
+              display={display}
+              unit={unit}
+              selectedMonth={selectedMonth}
+              setSelectedMonth={setSelectedMonth}
+              plan={plan}
+              category={category}
+              department={department}
+              actions={live.actions.filter((a) => a.category === category)}
+              dirty={dirty}
+              savedScenario={savedResult.scenario}
+              categorySelection={categorySelection}
+              allCategoryResults={allCategoryResults}
+              promoteCat={promoteCat}
+              openScenarioAtActions={() => {
+                setTab('scenario');
+                setStep(5);
+              }}
+            />
+          ))}
         {tab === 'projects' && (
           <Projects
             config={live}
             department={department}
+            departments={allSelectedDepartments}
             category={category}
             result={result}
             mutate={mutate}
@@ -615,6 +824,9 @@ export function App() {
             openProposed={openProposed}
             setTab={setTab}
             setSelectedMonth={setSelectedMonth}
+            categorySelection={categorySelection}
+            categoryClickThrough={categoryClickThrough}
+            allCategoryResults={allCategoryResults}
           />
         )}
         {tab === 'scenario' && (
@@ -650,6 +862,7 @@ export function App() {
             config={live}
             category={category}
             setCategory={setCategory}
+            department={department}
             mutate={mutate}
           />
         )}
@@ -675,6 +888,7 @@ export function App() {
           mutate={mutate}
           display={display}
           close={() => setDrawer(null)}
+          refreshFromBuildOps={openBuildOpsRefresh}
         />
       )}
       {modal === 'add-project' && (
@@ -754,6 +968,16 @@ export function App() {
           category={category}
           department={department}
           close={() => setModal(null)}
+        />
+      )}
+      {modal === 'buildops-refresh' && refreshProject && (
+        <BuildOpsRefreshModal
+          project={refreshProject}
+          close={() => {
+            setModal(null);
+            setRefreshProject(null);
+          }}
+          commit={commitBuildOpsRefresh}
         />
       )}
       {toast && <output className="toast">{toast}</output>}
@@ -889,10 +1113,17 @@ function CapacityActionMenu({
 }
 
 function ControlBar(p: {
-  department: string;
-  setDepartment: (v: string) => void;
-  category: LaborCategory;
-  setCategory: (v: LaborCategory) => void;
+  departmentSelection: DepartmentSelectionState;
+  toggleDept: (d: string) => void;
+  promoteDept: (d: string) => void;
+  setDeptMode: (mode: DepartmentMode) => void;
+  categorySelection: CategorySelectionState;
+  toggleCat: (c: LaborCategory) => void;
+  promoteCat: (c: LaborCategory) => void;
+  selectEveryConstrainedCat: () => void;
+  primaryOnlyCat: () => void;
+  allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
+  display: (v: number) => string;
   unit: Unit;
   setUnit: (v: Unit) => void;
   plans: WorkforcePlan[];
@@ -905,29 +1136,26 @@ function ControlBar(p: {
 }) {
   return (
     <section className="controls">
-      <Field
-        label="DEPARTMENT"
-        hint="Demand is filtered to the selected published department."
-      >
-        <select
-          value={p.department}
-          onChange={(e) => p.setDepartment(e.target.value)}
-        >
-          {DEPARTMENTS.map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-      </Field>
-      <Field label="LABOR CATEGORY">
-        <select
-          value={p.category}
-          onChange={(e) => p.setCategory(e.target.value as LaborCategory)}
-        >
-          {LABOR_CATEGORIES.map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-      </Field>
+      <DepartmentPicker
+        departments={DEPARTMENTS}
+        selection={p.departmentSelection}
+        toggle={p.toggleDept}
+        promote={p.promoteDept}
+        setMode={p.setDeptMode}
+        projectCount={(d) =>
+          PROJECTS.filter((project) => project.department === d).length
+        }
+      />
+      <LaborCategoryPicker
+        categories={LABOR_CATEGORIES}
+        allResults={p.allCategoryResults}
+        selection={p.categorySelection}
+        toggle={p.toggleCat}
+        promote={p.promoteCat}
+        selectEveryConstrained={p.selectEveryConstrainedCat}
+        primaryOnly={p.primaryOnlyCat}
+        display={p.display}
+      />
       <Field
         label="PLANNING WINDOW"
         hint="Rolling 18-month window supplied by the published data."
@@ -1017,6 +1245,13 @@ function Metric({
 
 function Dashboard({
   result,
+  chartResult,
+  combined,
+  combinedCategories,
+  combinedDepartments,
+  catView,
+  setCatView,
+  departmentCount,
   summary,
   display,
   unit,
@@ -1028,8 +1263,24 @@ function Dashboard({
   actions,
   dirty,
   savedScenario,
+  categorySelection,
+  allCategoryResults,
+  promoteCat,
+  openScenarioAtActions,
 }: {
   result: ReturnType<typeof analyze>;
+  /** Drives the demand chart, its tooltip and month-detail only. In combined
+   * mode (category-combine, department-combine, or both) this pools the
+   * selected categories/departments; otherwise identical to `result`. Metric
+   * tiles, recommendations and the workflow timeline always use `result`
+   * (the primary category and lead department alone). */
+  chartResult: ReturnType<typeof analyze>;
+  combined: boolean;
+  combinedCategories: boolean;
+  combinedDepartments: boolean;
+  catView: 'combined' | 'primary';
+  setCatView: (v: 'combined' | 'primary') => void;
+  departmentCount: number;
   summary: ReturnType<typeof metrics>;
   display: (v: number) => string;
   unit: Unit;
@@ -1041,19 +1292,25 @@ function Dashboard({
   actions: CapacityAction[];
   dirty: boolean;
   savedScenario: number[];
+  categorySelection: CategorySelectionState;
+  allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
+  promoteCat: (c: LaborCategory) => void;
+  openScenarioAtActions: () => void;
 }) {
+  const selected = selectedCategories(categorySelection);
+  const multiOn = selected.length > 1;
   const data = MONTHS.map((month, i) => ({
     month,
-    hard: result.hard[i],
-    expected: result.expected[i],
-    scenario: result.scenario[i],
-    prefab: result.prefab[i],
-    existing: result.existing[i],
-    confirmed: result.confirmedHires[i],
-    planned: result.plannedHires[i],
-    subcontract: result.subcontract[i],
-    overtime: result.overtime[i],
-    gap: result.gap[i],
+    hard: chartResult.hard[i],
+    expected: chartResult.expected[i],
+    scenario: chartResult.scenario[i],
+    prefab: chartResult.prefab[i],
+    existing: chartResult.existing[i],
+    confirmed: chartResult.confirmedHires[i],
+    planned: chartResult.plannedHires[i],
+    subcontract: chartResult.subcontract[i],
+    overtime: chartResult.overtime[i],
+    gap: chartResult.gap[i],
     ghost: savedScenario[i],
   }));
   const recs = recommendations(result);
@@ -1135,13 +1392,56 @@ function Dashboard({
           detail={`${plan.name} · ${plan.status} · ${summary.unconfirmedPeak.toFixed(1)} FTE unconfirmed at peak.`}
         />
       </section>
+      {combinedDepartments && (
+        <p className="info-note multi-department-note">
+          Demand and capacity are summed across {departmentCount} departments
+          below. Capacity above a department&apos;s own demand is not counted —
+          a surplus in one department cannot cover a shortage in another. The
+          tiles above, the workflow timeline and the recommendations still
+          reflect <strong>{department}</strong>, the lead department.
+        </p>
+      )}
       <section className="chart-card" data-tour="bottleneck-chart">
         <div className="card-heading">
           <div>
             <span>DEMAND VERSUS EXECUTABLE CAPACITY</span>
             <h2>
-              {category} — {department} · {plan.name}
+              {combinedCategories && combinedDepartments
+                ? `${selected.length} categories × ${departmentCount} departments combined · ${plan.name}`
+                : combinedCategories
+                  ? `${selected.length} categories combined — ${department} · ${plan.name}`
+                  : combinedDepartments
+                    ? `${category} — ${departmentCount} departments combined · ${plan.name}`
+                    : `${category} — ${department} · ${plan.name}`}
             </h2>
+            {multiOn && (
+              <div className="category-view-control">
+                <span className="field-label">CATEGORY VIEW</span>
+                <div className="category-view-row">
+                  <div className="overlap-toggle">
+                    <button
+                      type="button"
+                      className={catView === 'primary' ? 'on' : ''}
+                      onClick={() => setCatView('primary')}
+                    >
+                      {category} only
+                    </button>
+                    <button
+                      type="button"
+                      className={catView === 'combined' ? 'on' : ''}
+                      onClick={() => setCatView('combined')}
+                    >
+                      All {selected.length} combined
+                    </button>
+                  </div>
+                  <p className="category-view-note">
+                    {combined
+                      ? 'Demand and capacity are summed across the selected categories. Capacity above demand inside a category is not counted — a surplus in one trade cannot cover a shortage in another.'
+                      : `Showing ${category} alone. The comparison categories are plotted separately below.`}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
           <div className="chart-heading-controls">
             <label className="chart-month-jump" data-tour="month-jump">
@@ -1219,7 +1519,7 @@ function Dashboard({
                 angle={-45}
                 textAnchor="end"
                 tick={(props) => {
-                  const constrained = result.gap[props.index] > 0.05;
+                  const constrained = chartResult.gap[props.index] > 0.05;
                   return (
                     <Text
                       {...props}
@@ -1243,7 +1543,15 @@ function Dashboard({
                 }
               />
               <Tooltip
-                content={<PlannerTooltip result={result} display={display} />}
+                content={
+                  <PlannerTooltip
+                    result={chartResult}
+                    display={display}
+                    combinedCount={
+                      combinedCategories ? selected.length : undefined
+                    }
+                  />
+                }
               />
               {MONTH_KEYS.includes(TODAY_MONTH_KEY) && (
                 <ReferenceLine
@@ -1304,21 +1612,36 @@ function Dashboard({
           </ResponsiveContainer>
         </div>
       </section>
-      <MonthlyCompositionChart
-        result={result}
-        display={display}
-        selectedMonth={selectedMonth}
-        setSelectedMonth={setSelectedMonth}
-      />
+      {multiOn ? (
+        <GapMatrixCard
+          months={MONTHS}
+          allResults={allCategoryResults}
+          selection={categorySelection}
+          promote={promoteCat}
+          display={display}
+        />
+      ) : (
+        <MonthlyCompositionChart
+          result={chartResult}
+          display={display}
+          selectedMonth={selectedMonth}
+          setSelectedMonth={setSelectedMonth}
+        />
+      )}
       {selectedMonth !== null && (
         <MonthDetail
           index={selectedMonth}
-          result={result}
+          result={chartResult}
           display={display}
           close={() => setSelectedMonth(null)}
         />
       )}
-      <Timeline actions={actions} />
+      <Timeline
+        actions={actions}
+        category={category}
+        planName={plan.name}
+        openScenarioAtActions={openScenarioAtActions}
+      />
       <div className="summary-grid">
         <section className="black-card">
           <span>WHAT THIS PLAN REQUIRES</span>
@@ -1326,25 +1649,38 @@ function Dashboard({
             {plan.name} creates a {category.toLowerCase()} shortage beginning in{' '}
             {summary.firstMonth}, peaking at {display(summary.peak)} unresolved
             in {summary.peakMonth} after every planned action is counted.
+            {deadlines.length === 0 &&
+              ' No capacity action is scheduled for this category in this plan.'}
           </h2>
-          {deadlines.map((d) => (
-            <div className="deadline" key={d.id}>
-              <div>
-                <i className={d.date < TODAY ? 'red' : ''} />
-                <strong>
-                  {d.kind === 'hire'
-                    ? 'Begin recruiting'
-                    : 'Begin subcontract sourcing'}{' '}
-                  — {d.quantity} FTE
-                </strong>
-                <small>{d.notes}</small>
-              </div>
-              <b className={d.date < TODAY ? 'red' : ''}>
-                {d.date < TODAY ? 'OVERDUE · ' : ''}
-                {formatDate(d.date)}
-              </b>
+          {deadlines.length === 0 ? (
+            <div className="deadline-empty">
+              <i />
+              <span>
+                No hire, subcontract or overtime action exists for {category} in
+                this plan, so there is no action deadline to track. The
+                recommendations at right are the unactioned response to the gap.
+              </span>
             </div>
-          ))}
+          ) : (
+            deadlines.map((d) => (
+              <div className="deadline" key={d.id}>
+                <div>
+                  <i className={d.date < TODAY ? 'red' : ''} />
+                  <strong>
+                    {d.kind === 'hire'
+                      ? 'Begin recruiting'
+                      : 'Begin subcontract sourcing'}{' '}
+                    — {d.quantity} FTE
+                  </strong>
+                  <small>{d.notes}</small>
+                </div>
+                <b className={d.date < TODAY ? 'red' : ''}>
+                  {d.date < TODAY ? 'OVERDUE · ' : ''}
+                  {formatDate(d.date)}
+                </b>
+              </div>
+            ))
+          )}
         </section>
         <section className="recommend-card">
           <span>RECOMMENDATIONS — RULE-BASED, NOT A MANAGEMENT DECISION</span>
@@ -1483,11 +1819,15 @@ function PlannerTooltip({
   label,
   result,
   display,
+  combinedCount,
 }: {
   active?: boolean;
   label?: string;
   result: ReturnType<typeof analyze>;
   display: (v: number) => string;
+  /** When set, this many categories are combined — appended to the month
+   * header per §3's tooltip spec. */
+  combinedCount?: number;
 }) {
   const i = label ? MONTHS.indexOf(label) : -1;
   if (!active || i < 0) return null;
@@ -1504,7 +1844,10 @@ function PlannerTooltip({
   const gap = result.gap[i];
   return (
     <div className="chart-tooltip">
-      <strong>{label}</strong>
+      <strong>
+        {label}
+        {combinedCount ? ` · ${combinedCount} categories combined` : ''}
+      </strong>
       {rows.map(([name, value, color, bold]) => (
         <div key={name} className={bold ? 'bold' : ''}>
           <span>{name}</span>
@@ -1600,7 +1943,17 @@ function MonthDetail({
     </section>
   );
 }
-function Timeline({ actions }: { actions: CapacityAction[] }) {
+function Timeline({
+  actions,
+  category,
+  planName,
+  openScenarioAtActions,
+}: {
+  actions: CapacityAction[];
+  category: LaborCategory;
+  planName: string;
+  openScenarioAtActions: () => void;
+}) {
   const pct = (d: Date) =>
     Math.min(100, Math.max(0, (datePosition(d) / 18) * 100));
   return (
@@ -1611,101 +1964,117 @@ function Timeline({ actions }: { actions: CapacityAction[] }) {
           <h2>What must happen before capacity is productive</h2>
         </div>
       </div>
-      <div className="timeline-months">
-        <b>CAPACITY ACTION</b>
-        {MONTHS.map((m) => (
-          <span key={m}>{m.slice(0, 3)}</span>
-        ))}
-      </div>
-      {actions.map((action) => {
-        const timeline = actionMilestones(action);
-        const overdue = !action.confirmed && actionStartDate(action) < TODAY;
-        if (!timeline) {
-          const start = Math.max(0, action.fromIndex);
-          const width = Math.max(1, action.toIndex + 1 - start);
-          return (
-            <div className="timeline-row" key={action.id}>
-              <div>
-                <strong>
-                  {action.quantity} {action.category}
-                </strong>
-                <small>
-                  {action.kind} · {action.status}
-                </small>
-              </div>
-              <div className="timeline-grid">
-                {MONTHS.map((_, i) => (
-                  <i key={i} />
-                ))}
-                <span
-                  className={`timeline-bar ${action.kind}`}
-                  style={{
-                    gridColumn: `${start + 1} / span ${Math.min(width, 18 - start)}`,
-                  }}
-                >
-                  Active period
-                </span>
-              </div>
-            </div>
-          );
-        }
-        const productiveEndPct = timeline.productiveEnd
-          ? pct(timeline.productiveEnd)
-          : 100;
-        return (
-          <div className="timeline-row" key={action.id}>
-            <div>
-              <strong>
-                {action.quantity} {action.category}
-              </strong>
-              <small>
-                {action.kind} · {action.status}
-              </small>
-            </div>
-            <div className="timeline-grid">
-              {MONTHS.map((_, i) => (
-                <i key={i} />
-              ))}
-              {overdue && (
-                <span className="timeline-overdue-label">
-                  OVERDUE · WAS DUE {formatDate(actionStartDate(action))}
-                </span>
-              )}
-              {timeline.phases.map((phase, i) => {
-                const left = pct(phase.start);
-                const right = pct(phase.end);
-                return (
-                  <span
-                    key={phase.label}
-                    className={`phase phase-${i} ${action.kind === 'subcontract' ? 'subcontract' : ''}`}
-                    style={{
-                      left: `${left}%`,
-                      width: `${Math.max(right - left, 0.3)}%`,
-                    }}
-                    title={`${phase.label}: ${formatDate(phase.start)} – ${formatDate(phase.end)}`}
-                  />
-                );
-              })}
-              <span
-                className={`productive-segment ${action.confirmed ? '' : 'planned'}`}
-                style={{
-                  left: `${pct(timeline.productiveStart)}%`,
-                  width: `${Math.max(productiveEndPct - pct(timeline.productiveStart), 0.3)}%`,
-                }}
-                title="Productive"
-              />
-              {timeline.milestones.map((ms) => (
-                <span
-                  key={ms.label}
-                  className={`milestone ${ms.date < TODAY && !action.confirmed && !ms.final ? 'overdue' : ''} ${ms.final ? 'final' : ''}`}
-                  style={{ left: `${pct(ms.date)}%` }}
-                  title={`${ms.label}: ${formatDate(ms.date)}`}
-                />
-              ))}
-            </div>
+      {actions.length === 0 ? (
+        <div className="timeline-empty">
+          <p>
+            No capacity action is planned for {category} in {planName}. Add a
+            hire or subcontract action in the Scenario Builder to see its
+            recruiting, contracting and ramp-up lead times on this axis.
+          </p>
+          <button className="primary" onClick={openScenarioAtActions}>
+            OPEN SCENARIO BUILDER
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="timeline-months">
+            <b>CAPACITY ACTION</b>
+            {MONTHS.map((m) => (
+              <span key={m}>{m.slice(0, 3)}</span>
+            ))}
           </div>
-        );
-      })}
+          {actions.map((action) => {
+            const timeline = actionMilestones(action);
+            const overdue =
+              !action.confirmed && actionStartDate(action) < TODAY;
+            if (!timeline) {
+              const start = Math.max(0, action.fromIndex);
+              const width = Math.max(1, action.toIndex + 1 - start);
+              return (
+                <div className="timeline-row" key={action.id}>
+                  <div>
+                    <strong>
+                      {action.quantity} {action.category}
+                    </strong>
+                    <small>
+                      {action.kind} · {action.status}
+                    </small>
+                  </div>
+                  <div className="timeline-grid">
+                    {MONTHS.map((_, i) => (
+                      <i key={i} />
+                    ))}
+                    <span
+                      className={`timeline-bar ${action.kind}`}
+                      style={{
+                        gridColumn: `${start + 1} / span ${Math.min(width, 18 - start)}`,
+                      }}
+                    >
+                      Active period
+                    </span>
+                  </div>
+                </div>
+              );
+            }
+            const productiveEndPct = timeline.productiveEnd
+              ? pct(timeline.productiveEnd)
+              : 100;
+            return (
+              <div className="timeline-row" key={action.id}>
+                <div>
+                  <strong>
+                    {action.quantity} {action.category}
+                  </strong>
+                  <small>
+                    {action.kind} · {action.status}
+                  </small>
+                </div>
+                <div className="timeline-grid">
+                  {MONTHS.map((_, i) => (
+                    <i key={i} />
+                  ))}
+                  {overdue && (
+                    <span className="timeline-overdue-label">
+                      OVERDUE · WAS DUE {formatDate(actionStartDate(action))}
+                    </span>
+                  )}
+                  {timeline.phases.map((phase, i) => {
+                    const left = pct(phase.start);
+                    const right = pct(phase.end);
+                    return (
+                      <span
+                        key={phase.label}
+                        className={`phase phase-${i} ${action.kind === 'subcontract' ? 'subcontract' : ''}`}
+                        style={{
+                          left: `${left}%`,
+                          width: `${Math.max(right - left, 0.3)}%`,
+                        }}
+                        title={`${phase.label}: ${formatDate(phase.start)} – ${formatDate(phase.end)}`}
+                      />
+                    );
+                  })}
+                  <span
+                    className={`productive-segment ${action.confirmed ? '' : 'planned'}`}
+                    style={{
+                      left: `${pct(timeline.productiveStart)}%`,
+                      width: `${Math.max(productiveEndPct - pct(timeline.productiveStart), 0.3)}%`,
+                    }}
+                    title="Productive"
+                  />
+                  {timeline.milestones.map((ms) => (
+                    <span
+                      key={ms.label}
+                      className={`milestone ${ms.date < TODAY && !action.confirmed && !ms.final ? 'overdue' : ''} ${ms.final ? 'final' : ''}`}
+                      style={{ left: `${pct(ms.date)}%` }}
+                      title={`${ms.label}: ${formatDate(ms.date)}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
     </section>
   );
 }
@@ -1713,6 +2082,7 @@ function Timeline({ actions }: { actions: CapacityAction[] }) {
 function Projects({
   config,
   department,
+  departments,
   category,
   result,
   mutate,
@@ -1723,9 +2093,17 @@ function Projects({
   openProposed,
   setTab,
   setSelectedMonth,
+  categorySelection,
+  categoryClickThrough,
+  allCategoryResults,
 }: {
   config: ScenarioConfig;
+  /** The lead department — PortfolioOverlap stays scoped to this one alone. */
   department: string;
+  /** Every department in the current selection (Single: just the lead;
+   * Compare/Combine: the lead plus the comparison list). The projects table
+   * above PortfolioOverlap is scoped to all of these. */
+  departments: string[];
   category: LaborCategory;
   result: ReturnType<typeof analyze>;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
@@ -1736,13 +2114,18 @@ function Projects({
   openProposed: (id?: string) => void;
   setTab: (t: Tab) => void;
   setSelectedMonth: (v: number | null) => void;
+  categorySelection: CategorySelectionState;
+  categoryClickThrough: (category: LaborCategory, monthIndex?: number) => void;
+  allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
 }) {
-  const visibleProjects = PROJECTS.filter(
-    (project) => project.department === department,
+  const visibleProjects = PROJECTS.filter((project) =>
+    departments.includes(project.department),
   );
-  const visibleProposed = config.proposedProjects.filter(
-    (project) => project.department === department,
+  const visibleProposed = config.proposedProjects.filter((project) =>
+    departments.includes(project.department),
   );
+  const hiddenCount = PROJECTS.length - visibleProjects.length;
+  const showDepartmentDot = departments.length > 1;
   return (
     <section className="screen-card">
       <div className="section-title">
@@ -1754,6 +2137,16 @@ function Projects({
             proposed scenario{' '}
             {visibleProposed.length === 1 ? 'project' : 'projects'}
           </p>
+          {hiddenCount > 0 && (
+            <p>
+              {hiddenCount}{' '}
+              {hiddenCount === 1
+                ? 'project in another department is'
+                : 'projects in other departments are'}{' '}
+              not shown. Capacity belongs to its department, so they cannot
+              affect this plan.
+            </p>
+          )}
         </div>
         <button
           onClick={() =>
@@ -1816,6 +2209,17 @@ function Projects({
                       {p.name}
                     </button>
                     <small>
+                      {showDepartmentDot && (
+                        <span
+                          className="dept-picker-dot"
+                          style={{
+                            background: departmentColor(
+                              departments.indexOf(p.department),
+                            ),
+                          }}
+                          aria-hidden="true"
+                        />
+                      )}
                       {p.department} · {p.primaryLabor}
                     </small>
                   </td>
@@ -1967,7 +2371,20 @@ function Projects({
                   >
                     {proposed.name}
                   </button>
-                  <small>{proposed.department}</small>
+                  <small>
+                    {showDepartmentDot && (
+                      <span
+                        className="dept-picker-dot"
+                        style={{
+                          background: departmentColor(
+                            departments.indexOf(proposed.department),
+                          ),
+                        }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    {proposed.department}
+                  </small>
                 </td>
                 <td>Proposed</td>
                 <td>${proposed.value.toFixed(1)}M</td>
@@ -1992,6 +2409,14 @@ function Projects({
           </tbody>
         </table>
       </div>
+      <BottleneckHeatmap
+        categories={LABOR_CATEGORIES}
+        months={MONTHS}
+        allResults={allCategoryResults}
+        selection={categorySelection}
+        clickThrough={categoryClickThrough}
+        display={display}
+      />
       <PortfolioOverlap
         config={config}
         department={department}
@@ -2320,12 +2745,14 @@ function ProjectDrawer({
   mutate,
   display,
   close,
+  refreshFromBuildOps,
 }: {
   project: Project;
   config: ScenarioConfig;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
   display: (v: number) => string;
   close: () => void;
+  refreshFromBuildOps: (project: Project) => void;
 }) {
   const prob =
     project.type === 'Hard'
@@ -2354,6 +2781,11 @@ function ProjectDrawer({
           <p>
             ${project.value.toFixed(1)}M · {project.department}
           </p>
+          {project.type === 'Hard' && (
+            <button onClick={() => refreshFromBuildOps(project)}>
+              <Upload size={14} /> Refresh from BuildOps
+            </button>
+          )}
           <button onClick={close}>
             <X /> Close
           </button>
@@ -2822,16 +3254,18 @@ function Capacity({
   config,
   category,
   setCategory,
+  department,
   mutate,
 }: {
   config: ScenarioConfig;
   category: LaborCategory;
   setCategory: (c: LaborCategory) => void;
+  department: string;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
 }) {
   const selected = config.capacity[category];
   const fields: [keyof typeof selected, string][] = [
-    ['headcount', 'Headcount'],
+    ['headcount', 'Company headcount'],
     ['prefabCapacity', 'Prefab shop cap.'],
     ['productiveHours', 'Prod hrs/person/mo'],
     ['hourlyRate', 'Std cost/hour'],
@@ -2857,11 +3291,18 @@ function Capacity({
             <p>Inputs update every analysis view immediately.</p>
           </div>
         </div>
+        <p className="info-note">
+          Headcount is maintained company-wide. A per-department roster split
+          from the data pipeline isn&apos;t published yet — until then, the
+          dashboard uses each category&apos;s full company headcount for every
+          department, including {department}.
+        </p>
         <div className="table-scroll">
           <table className="capacity-table">
             <thead>
               <tr>
                 <th>LABOR CATEGORY</th>
+                <th>THIS DEPT ROSTER</th>
                 {fields.map(([, label]) => (
                   <th key={label}>{label}</th>
                 ))}
@@ -2880,6 +3321,14 @@ function Capacity({
                       >
                         {cat}
                       </button>
+                    </td>
+                    <td>
+                      <span
+                        className="dept-picker-dot"
+                        style={{ background: '#EFEEEC' }}
+                        aria-hidden="true"
+                      />
+                      <small>Not yet available</small>
                     </td>
                     {fields.map(([key, fieldLabel]) => (
                       <td key={key}>
@@ -2934,9 +3383,9 @@ function Capacity({
           <h2>{category}</h2>
         </header>
         <Metric
-          label="RAW HEADCOUNT"
+          label="COMPANY HEADCOUNT"
           value={`${selected.headcount}`}
-          detail="Department-owned workforce"
+          detail="Not yet split by department"
         />
         <Metric
           label="PRE-FAB SHOP CAPACITY"
@@ -3484,6 +3933,17 @@ function AddProjectModal({
             </span>
           </button>
         </div>
+        <TrustContractCards
+          canChange={[
+            'Contract value, cost mix and internal labor budget',
+            "Labor allocation by category, from the estimate's crew build-up",
+            'A monthly staffing forecast derived from the estimate schedule',
+          ]}
+          neverTouches={[
+            'Every existing project, plan and capacity action',
+            'It enters as soft backlog at a planning probability you set, and stays editable',
+          ]}
+        />
         {error && (
           <div className="data-import-error add-project-error" role="alert">
             <strong>The estimate could not be imported.</strong>
@@ -3604,15 +4064,44 @@ function SoftBacklogModal({
         </header>
         <div className="soft-backlog-body">
           {draft.sourceFileName && !editingProjectId && (
-            <section className="estimate-import-summary">
-              <div>
-                <strong>{draft.sourceFileName}</strong>
-                <span>
-                  Extracted: {draft.extractedFields.join(', ') || 'No fields'}
-                </span>
-              </div>
-              <b>{draft.extractedFields.length} fields recognized</b>
-            </section>
+            <>
+              <CountTileStrip
+                tiles={[
+                  {
+                    label: 'FIELDS EXTRACTED',
+                    value: draft.extractedFields.length,
+                  },
+                  {
+                    label: 'LABOR CATEGORIES',
+                    value: Object.values(project.laborAllocation).filter(
+                      (v) => (v ?? 0) > 0,
+                    ).length,
+                  },
+                  {
+                    label: 'FORECAST MONTHS',
+                    value: project.curve.filter((v) => v > 0).length,
+                  },
+                  {
+                    label: 'ASSUMPTIONS FLAGGED',
+                    value: draft.warnings.length,
+                    tone: draft.warnings.length ? 'warning' : 'success',
+                  },
+                  {
+                    label: 'BLOCKING ERRORS',
+                    value: issues.length,
+                    tone: issues.length ? 'danger' : 'success',
+                  },
+                ]}
+              />
+              <section className="estimate-import-summary">
+                <div>
+                  <strong>{draft.sourceFileName}</strong>
+                  <span>
+                    Extracted: {draft.extractedFields.join(', ') || 'No fields'}
+                  </span>
+                </div>
+              </section>
+            </>
           )}
           {draft.warnings.length > 0 && (
             <section className="estimate-warnings">
@@ -3983,6 +4472,54 @@ function SoftBacklogModal({
   );
 }
 
+function ArchetypePicker({
+  archetypes,
+  selectedId,
+  onSelect,
+}: {
+  archetypes: ProposedProjectArchetype[];
+  selectedId: string;
+  onSelect: (archetype: ProposedProjectArchetype) => void;
+}) {
+  return (
+    <div className="archetype-picker">
+      <span className="field-label">START FROM A REAL PROJECT TYPE</span>
+      <div className="archetype-grid">
+        {archetypes.map((item) => {
+          const trades = leadingTrades(item);
+          const comparable = comparableProjectCount(item);
+          const selected = item.id === selectedId;
+          return (
+            <button
+              type="button"
+              key={item.id}
+              className={`archetype-card${selected ? ' selected' : ''}`}
+              onClick={() => onSelect(item)}
+            >
+              <strong>{item.name}</strong>
+              <small>
+                {comparable !== null
+                  ? `${comparable} comparable projects · `
+                  : ''}
+                {item.defaultDurationMonths} months ·{' '}
+                {item.costMix.internalLabor}% internal labor
+              </small>
+              {trades.length > 0 && (
+                <em>
+                  Leads with{' '}
+                  {trades
+                    .map(([category, share]) => `${category} ${share}%`)
+                    .join(', ')}
+                </em>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ProposedIntakeModal({
   draft,
   setDraft,
@@ -4028,10 +4565,23 @@ function ProposedIntakeModal({
           </button>
         </header>
         <div className="proposed-intake-body">
+          <ArchetypePicker
+            archetypes={PROPOSED_PROJECT_ARCHETYPES}
+            selectedId={draft.archetypeId}
+            onSelect={(nextArchetype) =>
+              update({
+                archetypeId: nextArchetype.id,
+                endIndex: Math.min(
+                  MONTHS.length - 1,
+                  draft.startIndex + nextArchetype.defaultDurationMonths - 1,
+                ),
+              })
+            }
+          />
           <p className="section-copy">
-            The selected project type supplies the initial cost, labor, and
-            staffing assumptions. You can review and change them on the next
-            screen.
+            {archetype
+              ? `Cost mix, labor allocation, duration and curve are the ${archetype.name} averages. Every field stays editable on the next screen.`
+              : 'Pick the archetype closest to this project. It fills cost mix, labor allocation, duration and curve from real comparable projects — every field stays editable.'}
           </p>
           <div className="form-grid">
             <Field label="PROJECT NAME">
@@ -4041,33 +4591,8 @@ function ProposedIntakeModal({
                 onChange={(event) => update({ name: event.target.value })}
               />
             </Field>
-            <Field label="PROJECT TYPE / ASSUMPTION SET">
-              <select
-                value={draft.archetypeId}
-                onChange={(event) => {
-                  const nextArchetype = PROPOSED_PROJECT_ARCHETYPES.find(
-                    (item) => item.id === event.target.value,
-                  );
-                  update({
-                    archetypeId: event.target.value,
-                    endIndex: Math.min(
-                      MONTHS.length - 1,
-                      draft.startIndex +
-                        (nextArchetype?.defaultDurationMonths ?? 1) -
-                        1,
-                    ),
-                  });
-                }}
-              >
-                {PROPOSED_PROJECT_ARCHETYPES.length === 0 && (
-                  <option value="">No assumption sets available</option>
-                )}
-                {PROPOSED_PROJECT_ARCHETYPES.map((item) => (
-                  <option value={item.id} key={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
+            <Field label="PROJECT ARCHETYPE">
+              <input readOnly value={archetype?.name ?? 'None selected'} />
             </Field>
             <Field label="DEPARTMENT">
               <select
@@ -4212,6 +4737,28 @@ function ProposedModal({
     config.proposedProjects[0];
   const dialogRef = useDialogA11y<HTMLElement>(() => close(true));
   if (!a) return null;
+  const archetype = PROPOSED_PROJECT_ARCHETYPES.find(
+    (item) => item.id === a.archetypeId,
+  );
+  const drifted = archetype
+    ? hasDriftedFromArchetype(a, archetype, LABOR_CATEGORIES)
+    : false;
+  const resetToArchetype = () => {
+    if (!archetype) return;
+    setLive((c) => ({
+      ...c,
+      proposedProjects: c.proposedProjects.map((project) =>
+        project.id === a.id
+          ? resetProposedProjectToArchetype(
+              project,
+              archetype,
+              LABOR_CATEGORIES,
+              MONTHS.length,
+            )
+          : project,
+      ),
+    }));
+  };
   const issues = [
     ...(!a.name.trim() ? ['Project name is required.'] : []),
     ...(a.value <= 0 ? ['Contract value must be greater than zero.'] : []),
@@ -4259,9 +4806,31 @@ function ProposedModal({
                   onChange={(e) => update('name', e.target.value)}
                 />
               </Field>
-              <Field label="PROJECT TYPE / ASSUMPTION SET">
-                <input readOnly value={a.projectType} />
-              </Field>
+              <div className="field archetype-status-field">
+                <div className="field-label-row">
+                  <span className="field-label">PROJECT ARCHETYPE</span>
+                  {archetype && drifted && (
+                    <>
+                      <span className="adjusted-badge">ADJUSTED</span>
+                      <button
+                        type="button"
+                        className="text-link"
+                        onClick={resetToArchetype}
+                      >
+                        Reset to archetype
+                      </button>
+                    </>
+                  )}
+                </div>
+                <input readOnly value={archetype?.name ?? a.projectType} />
+                <small className="field-hint">
+                  {!archetype
+                    ? 'This project was not created from a known archetype.'
+                    : drifted
+                      ? `Adjusted from the ${archetype.name} starting point.`
+                      : `Cost mix, labor allocation, duration and curve are the ${archetype.name} averages.`}
+                </small>
+              </div>
               <Field label="DEPARTMENT / LOCATION">
                 <select
                   value={a.department}

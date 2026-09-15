@@ -176,6 +176,10 @@ export interface ProposedProject {
   name: string;
   department: string;
   projectType: string;
+  /** Which ProposedProjectArchetype this was created from, if any — drives
+   * the ADJUSTED badge / "Reset to archetype" drift comparison. Undefined
+   * for projects created before archetypes existed. */
+  archetypeId?: string;
   value: number;
   startIndex: number;
   durationMonths: number;
