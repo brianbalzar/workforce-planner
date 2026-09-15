@@ -73,6 +73,8 @@ import {
   activeRange,
   analyze,
   assumptionFlagsForProject,
+  categoryUnitWeight,
+  combineWeightedResults,
   datePosition,
   forecastFreshness,
   formatDate,
@@ -88,8 +90,15 @@ import { loadPlanState, resetPlans, savePlans } from '../persistence/planStore';
 import { GuidedTour, TOUR_SEEN_KEY } from './GuidedTour';
 import { LaborCategoryPicker } from './LaborCategoryPicker';
 import { BottleneckHeatmap } from './BottleneckHeatmap';
-import { CategoryOverlayGapChart } from './CategoryOverlayGapChart';
-import { sortCategoriesByBottleneck } from './categoryStatus';
+import { GapMatrixCard } from './GapMatrixCard';
+import { peakGap } from './categoryStatus';
+import {
+  promoteCategory,
+  selectEveryConstrained,
+  selectedCategories,
+  toggleCategory,
+  type CategorySelectionState,
+} from './categorySelection';
 
 export type Tab =
   | 'dashboard'
@@ -166,15 +175,12 @@ export function App() {
   const [live, setLive] = useState<ScenarioConfig>(() => clone(initial.config));
   const [undo, setUndo] = useState<ScenarioConfig[]>([]);
   const [tab, setTab] = useState<Tab>('dashboard');
-  const [selectedCategories, setSelectedCategories] = useState<
-    Set<LaborCategory>
-  >(
-    () =>
-      new Set([
-        LABOR_CATEGORIES.includes('Plumber') ? 'Plumber' : LABOR_CATEGORIES[0],
-      ]),
+  const [category, setCategoryState] = useState<LaborCategory>(
+    LABOR_CATEGORIES.includes('Plumber') ? 'Plumber' : LABOR_CATEGORIES[0],
   );
-  const setCategory = (c: LaborCategory) => setSelectedCategories(new Set([c]));
+  const [extra, setExtra] = useState<LaborCategory[]>([]);
+  const [catView, setCatView] = useState<'combined' | 'primary'>('combined');
+  const categorySelection: CategorySelectionState = { category, extra };
   const [department, setDepartment] = useState(DEPARTMENTS[0]);
   const [unit, setUnit] = useState<Unit>('People');
   const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
@@ -209,8 +215,8 @@ export function App() {
   });
   const plan = plans.find((p) => p.id === planId) || plans[0];
   // Every category's analyze() result, computed once here rather than per
-  // component, so the heatmap and the picker widget's status dots/sparklines
-  // never recompute what the other already has.
+  // component, so the picker widget, gap-matrix and heatmap never recompute
+  // what another already has.
   const allCategoryResults = useMemo(
     () =>
       new Map(
@@ -218,24 +224,52 @@ export function App() {
       ),
     [live, department],
   );
-  // Every single-category consumer (the main bottleneck chart, assumptions,
-  // Capacity, ProposedModal, CompareModal, etc.) still needs one category —
-  // use the worst-bottleneck category among those checked, so checking just
-  // one behaves exactly like today and checking several still shows the most
-  // urgent one everywhere that can only show one.
-  const category = useMemo(
-    () =>
-      sortCategoriesByBottleneck([...selectedCategories], (c) =>
-        allCategoryResults.get(c)!,
-      )[0] ?? LABOR_CATEGORIES[0],
-    [selectedCategories, allCategoryResults],
-  );
-  const result = useMemo(
-    () =>
-      allCategoryResults.get(category) ?? analyze(live, category, department),
-    [allCategoryResults, category, live, department],
-  );
-  const summary = useMemo(() => metrics(result), [result]);
+  const result =
+    allCategoryResults.get(category) ?? analyze(live, category, department);
+  const summary = metrics(result);
+  const setCategory = (c: LaborCategory) => {
+    setCategoryState(c);
+    setExtra([]);
+    setSelectedMonth(null);
+  };
+  const toggleCat = (c: LaborCategory) => {
+    const next = toggleCategory(categorySelection, c);
+    if (next.extra.length > extra.length) setCatView('combined');
+    setCategoryState(next.category);
+    setExtra(next.extra);
+    setSelectedMonth(null);
+  };
+  const promoteCat = (c: LaborCategory) => {
+    const next = promoteCategory(categorySelection, c);
+    setCategoryState(next.category);
+    setExtra(next.extra);
+    setSelectedMonth(null);
+  };
+  const primaryOnlyCat = () => {
+    setExtra([]);
+    setSelectedMonth(null);
+  };
+  const selectEveryConstrainedCat = () => {
+    const next = selectEveryConstrained(
+      categorySelection,
+      LABOR_CATEGORIES,
+      (c) => peakGap(allCategoryResults.get(c)!).peak,
+    );
+    setCatView('combined');
+    setCategoryState(next.category);
+    setExtra(next.extra);
+    setSelectedMonth(null);
+  };
+  // Heatmap click-through: sets the clicked category as primary, moves the
+  // previous primary into the comparison set (capped at 4 extras beyond the
+  // new primary), and optionally jumps straight to a month.
+  const categoryClickThrough = (c: LaborCategory, monthIndex?: number) => {
+    const next = promoteCategory(categorySelection, c);
+    setCategoryState(next.category);
+    setExtra(next.extra.slice(0, 4));
+    setSelectedMonth(monthIndex ?? null);
+    setTab('dashboard');
+  };
   const savedResult = useMemo(
     () => analyze(saved, category, department),
     [saved, category, department],
@@ -249,6 +283,20 @@ export function App() {
       assumptions.productiveHours,
       assumptions.hourlyRate,
     );
+  // §3 combined mode: only when 2+ categories are selected and the user
+  // hasn't switched to "primary only". Drives the demand chart, its
+  // tooltip and month-detail only — tiles/recommendations/timeline always
+  // follow the primary category's own `result` above.
+  const combinedCategories = extra.length > 0 && catView !== 'primary';
+  const chartResult = useMemo(() => {
+    if (!combinedCategories) return result;
+    const primaryAssumption = live.capacity[category];
+    const entries = selectedCategories({ category, extra }).map((c) => ({
+      result: analyze(live, c, department),
+      weight: categoryUnitWeight(unit, primaryAssumption, live.capacity[c]),
+    }));
+    return combineWeightedResults(entries);
+  }, [combinedCategories, result, category, extra, live, department, unit]);
 
   useEffect(() => {
     if (!sourceChanged && runtimeData.mode !== 'uploaded') savePlans(plans);
@@ -595,9 +643,13 @@ export function App() {
         <ControlBar
           department={department}
           setDepartment={setDepartment}
-          selectedCategories={selectedCategories}
-          setSelectedCategories={setSelectedCategories}
+          categorySelection={categorySelection}
+          toggleCat={toggleCat}
+          promoteCat={promoteCat}
+          selectEveryConstrainedCat={selectEveryConstrainedCat}
+          primaryOnlyCat={primaryOnlyCat}
           allCategoryResults={allCategoryResults}
+          display={display}
           unit={unit}
           setUnit={setUnit}
           plans={plans}
@@ -622,6 +674,10 @@ export function App() {
         {tab === 'dashboard' && (
           <Dashboard
             result={result}
+            chartResult={chartResult}
+            combined={combinedCategories}
+            catView={catView}
+            setCatView={setCatView}
             summary={summary}
             display={display}
             unit={unit}
@@ -630,11 +686,16 @@ export function App() {
             plan={plan}
             category={category}
             department={department}
-            actions={live.actions}
+            actions={live.actions.filter((a) => a.category === category)}
             dirty={dirty}
             savedScenario={savedResult.scenario}
-            selectedCategories={selectedCategories}
+            categorySelection={categorySelection}
             allCategoryResults={allCategoryResults}
+            promoteCat={promoteCat}
+            openScenarioAtActions={() => {
+              setTab('scenario');
+              setStep(5);
+            }}
           />
         )}
         {tab === 'projects' && (
@@ -651,8 +712,8 @@ export function App() {
             openProposed={openProposed}
             setTab={setTab}
             setSelectedMonth={setSelectedMonth}
-            selectedCategories={selectedCategories}
-            setSelectedCategories={setSelectedCategories}
+            categorySelection={categorySelection}
+            categoryClickThrough={categoryClickThrough}
             allCategoryResults={allCategoryResults}
           />
         )}
@@ -930,9 +991,13 @@ function CapacityActionMenu({
 function ControlBar(p: {
   department: string;
   setDepartment: (v: string) => void;
-  selectedCategories: Set<LaborCategory>;
-  setSelectedCategories: (v: Set<LaborCategory>) => void;
+  categorySelection: CategorySelectionState;
+  toggleCat: (c: LaborCategory) => void;
+  promoteCat: (c: LaborCategory) => void;
+  selectEveryConstrainedCat: () => void;
+  primaryOnlyCat: () => void;
   allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
+  display: (v: number) => string;
   unit: Unit;
   setUnit: (v: Unit) => void;
   plans: WorkforcePlan[];
@@ -961,8 +1026,12 @@ function ControlBar(p: {
       <LaborCategoryPicker
         categories={LABOR_CATEGORIES}
         allResults={p.allCategoryResults}
-        selected={p.selectedCategories}
-        setSelected={p.setSelectedCategories}
+        selection={p.categorySelection}
+        toggle={p.toggleCat}
+        promote={p.promoteCat}
+        selectEveryConstrained={p.selectEveryConstrainedCat}
+        primaryOnly={p.primaryOnlyCat}
+        display={p.display}
       />
       <Field
         label="PLANNING WINDOW"
@@ -1053,6 +1122,10 @@ function Metric({
 
 function Dashboard({
   result,
+  chartResult,
+  combined,
+  catView,
+  setCatView,
   summary,
   display,
   unit,
@@ -1064,10 +1137,20 @@ function Dashboard({
   actions,
   dirty,
   savedScenario,
-  selectedCategories,
+  categorySelection,
   allCategoryResults,
+  promoteCat,
+  openScenarioAtActions,
 }: {
   result: ReturnType<typeof analyze>;
+  /** Drives the demand chart, its tooltip and month-detail only. In combined
+   * mode this pools the selected categories; otherwise identical to
+   * `result`. Metric tiles, recommendations and the workflow timeline
+   * always use `result` (the primary category alone). */
+  chartResult: ReturnType<typeof analyze>;
+  combined: boolean;
+  catView: 'combined' | 'primary';
+  setCatView: (v: 'combined' | 'primary') => void;
   summary: ReturnType<typeof metrics>;
   display: (v: number) => string;
   unit: Unit;
@@ -1079,21 +1162,25 @@ function Dashboard({
   actions: CapacityAction[];
   dirty: boolean;
   savedScenario: number[];
-  selectedCategories: Set<LaborCategory>;
+  categorySelection: CategorySelectionState;
   allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
+  promoteCat: (c: LaborCategory) => void;
+  openScenarioAtActions: () => void;
 }) {
+  const selected = selectedCategories(categorySelection);
+  const multiOn = selected.length > 1;
   const data = MONTHS.map((month, i) => ({
     month,
-    hard: result.hard[i],
-    expected: result.expected[i],
-    scenario: result.scenario[i],
-    prefab: result.prefab[i],
-    existing: result.existing[i],
-    confirmed: result.confirmedHires[i],
-    planned: result.plannedHires[i],
-    subcontract: result.subcontract[i],
-    overtime: result.overtime[i],
-    gap: result.gap[i],
+    hard: chartResult.hard[i],
+    expected: chartResult.expected[i],
+    scenario: chartResult.scenario[i],
+    prefab: chartResult.prefab[i],
+    existing: chartResult.existing[i],
+    confirmed: chartResult.confirmedHires[i],
+    planned: chartResult.plannedHires[i],
+    subcontract: chartResult.subcontract[i],
+    overtime: chartResult.overtime[i],
+    gap: chartResult.gap[i],
     ghost: savedScenario[i],
   }));
   const recs = recommendations(result);
@@ -1175,22 +1262,43 @@ function Dashboard({
           detail={`${plan.name} · ${plan.status} · ${summary.unconfirmedPeak.toFixed(1)} FTE unconfirmed at peak.`}
         />
       </section>
-      {selectedCategories.size > 1 && (
-        <p className="info-note multi-category-note">
-          {selectedCategories.size} labor categories selected — the tiles above
-          and the chart below still reflect <strong>{category}</strong>, the
-          worst bottleneck among them. Use the overlay chart further down, or
-          the all-categories heatmap on the Projects tab, to compare across all
-          selected categories.
-        </p>
-      )}
       <section className="chart-card" data-tour="bottleneck-chart">
         <div className="card-heading">
           <div>
             <span>DEMAND VERSUS EXECUTABLE CAPACITY</span>
             <h2>
-              {category} — {department} · {plan.name}
+              {combined
+                ? `${selected.length} categories combined — ${department} · ${plan.name}`
+                : `${category} — ${department} · ${plan.name}`}
             </h2>
+            {multiOn && (
+              <div className="category-view-control">
+                <span className="field-label">CATEGORY VIEW</span>
+                <div className="category-view-row">
+                  <div className="overlap-toggle">
+                    <button
+                      type="button"
+                      className={catView === 'primary' ? 'on' : ''}
+                      onClick={() => setCatView('primary')}
+                    >
+                      {category} only
+                    </button>
+                    <button
+                      type="button"
+                      className={catView === 'combined' ? 'on' : ''}
+                      onClick={() => setCatView('combined')}
+                    >
+                      All {selected.length} combined
+                    </button>
+                  </div>
+                  <p className="category-view-note">
+                    {combined
+                      ? 'Demand and capacity are summed across the selected categories. Capacity above demand inside a category is not counted — a surplus in one trade cannot cover a shortage in another.'
+                      : `Showing ${category} alone. The comparison categories are plotted separately below.`}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
           <div className="chart-heading-controls">
             <label className="chart-month-jump" data-tour="month-jump">
@@ -1268,7 +1376,7 @@ function Dashboard({
                 angle={-45}
                 textAnchor="end"
                 tick={(props) => {
-                  const constrained = result.gap[props.index] > 0.05;
+                  const constrained = chartResult.gap[props.index] > 0.05;
                   return (
                     <Text
                       {...props}
@@ -1292,7 +1400,13 @@ function Dashboard({
                 }
               />
               <Tooltip
-                content={<PlannerTooltip result={result} display={display} />}
+                content={
+                  <PlannerTooltip
+                    result={chartResult}
+                    display={display}
+                    combinedCount={combined ? selected.length : undefined}
+                  />
+                }
               />
               {MONTH_KEYS.includes(TODAY_MONTH_KEY) && (
                 <ReferenceLine
@@ -1353,16 +1467,17 @@ function Dashboard({
           </ResponsiveContainer>
         </div>
       </section>
-      {selectedCategories.size > 1 ? (
-        <CategoryOverlayGapChart
-          categories={LABOR_CATEGORIES}
-          selected={selectedCategories}
+      {multiOn ? (
+        <GapMatrixCard
           months={MONTHS}
           allResults={allCategoryResults}
+          selection={categorySelection}
+          promote={promoteCat}
+          display={display}
         />
       ) : (
         <MonthlyCompositionChart
-          result={result}
+          result={chartResult}
           display={display}
           selectedMonth={selectedMonth}
           setSelectedMonth={setSelectedMonth}
@@ -1371,12 +1486,17 @@ function Dashboard({
       {selectedMonth !== null && (
         <MonthDetail
           index={selectedMonth}
-          result={result}
+          result={chartResult}
           display={display}
           close={() => setSelectedMonth(null)}
         />
       )}
-      <Timeline actions={actions} />
+      <Timeline
+        actions={actions}
+        category={category}
+        planName={plan.name}
+        openScenarioAtActions={openScenarioAtActions}
+      />
       <div className="summary-grid">
         <section className="black-card">
           <span>WHAT THIS PLAN REQUIRES</span>
@@ -1384,25 +1504,38 @@ function Dashboard({
             {plan.name} creates a {category.toLowerCase()} shortage beginning in{' '}
             {summary.firstMonth}, peaking at {display(summary.peak)} unresolved
             in {summary.peakMonth} after every planned action is counted.
+            {deadlines.length === 0 &&
+              ' No capacity action is scheduled for this category in this plan.'}
           </h2>
-          {deadlines.map((d) => (
-            <div className="deadline" key={d.id}>
-              <div>
-                <i className={d.date < TODAY ? 'red' : ''} />
-                <strong>
-                  {d.kind === 'hire'
-                    ? 'Begin recruiting'
-                    : 'Begin subcontract sourcing'}{' '}
-                  — {d.quantity} FTE
-                </strong>
-                <small>{d.notes}</small>
-              </div>
-              <b className={d.date < TODAY ? 'red' : ''}>
-                {d.date < TODAY ? 'OVERDUE · ' : ''}
-                {formatDate(d.date)}
-              </b>
+          {deadlines.length === 0 ? (
+            <div className="deadline-empty">
+              <i />
+              <span>
+                No hire, subcontract or overtime action exists for {category} in
+                this plan, so there is no action deadline to track. The
+                recommendations at right are the unactioned response to the gap.
+              </span>
             </div>
-          ))}
+          ) : (
+            deadlines.map((d) => (
+              <div className="deadline" key={d.id}>
+                <div>
+                  <i className={d.date < TODAY ? 'red' : ''} />
+                  <strong>
+                    {d.kind === 'hire'
+                      ? 'Begin recruiting'
+                      : 'Begin subcontract sourcing'}{' '}
+                    — {d.quantity} FTE
+                  </strong>
+                  <small>{d.notes}</small>
+                </div>
+                <b className={d.date < TODAY ? 'red' : ''}>
+                  {d.date < TODAY ? 'OVERDUE · ' : ''}
+                  {formatDate(d.date)}
+                </b>
+              </div>
+            ))
+          )}
         </section>
         <section className="recommend-card">
           <span>RECOMMENDATIONS — RULE-BASED, NOT A MANAGEMENT DECISION</span>
@@ -1541,11 +1674,15 @@ function PlannerTooltip({
   label,
   result,
   display,
+  combinedCount,
 }: {
   active?: boolean;
   label?: string;
   result: ReturnType<typeof analyze>;
   display: (v: number) => string;
+  /** When set, this many categories are combined — appended to the month
+   * header per §3's tooltip spec. */
+  combinedCount?: number;
 }) {
   const i = label ? MONTHS.indexOf(label) : -1;
   if (!active || i < 0) return null;
@@ -1562,7 +1699,10 @@ function PlannerTooltip({
   const gap = result.gap[i];
   return (
     <div className="chart-tooltip">
-      <strong>{label}</strong>
+      <strong>
+        {label}
+        {combinedCount ? ` · ${combinedCount} categories combined` : ''}
+      </strong>
       {rows.map(([name, value, color, bold]) => (
         <div key={name} className={bold ? 'bold' : ''}>
           <span>{name}</span>
@@ -1658,7 +1798,17 @@ function MonthDetail({
     </section>
   );
 }
-function Timeline({ actions }: { actions: CapacityAction[] }) {
+function Timeline({
+  actions,
+  category,
+  planName,
+  openScenarioAtActions,
+}: {
+  actions: CapacityAction[];
+  category: LaborCategory;
+  planName: string;
+  openScenarioAtActions: () => void;
+}) {
   const pct = (d: Date) =>
     Math.min(100, Math.max(0, (datePosition(d) / 18) * 100));
   return (
@@ -1669,101 +1819,117 @@ function Timeline({ actions }: { actions: CapacityAction[] }) {
           <h2>What must happen before capacity is productive</h2>
         </div>
       </div>
-      <div className="timeline-months">
-        <b>CAPACITY ACTION</b>
-        {MONTHS.map((m) => (
-          <span key={m}>{m.slice(0, 3)}</span>
-        ))}
-      </div>
-      {actions.map((action) => {
-        const timeline = actionMilestones(action);
-        const overdue = !action.confirmed && actionStartDate(action) < TODAY;
-        if (!timeline) {
-          const start = Math.max(0, action.fromIndex);
-          const width = Math.max(1, action.toIndex + 1 - start);
-          return (
-            <div className="timeline-row" key={action.id}>
-              <div>
-                <strong>
-                  {action.quantity} {action.category}
-                </strong>
-                <small>
-                  {action.kind} · {action.status}
-                </small>
-              </div>
-              <div className="timeline-grid">
-                {MONTHS.map((_, i) => (
-                  <i key={i} />
-                ))}
-                <span
-                  className={`timeline-bar ${action.kind}`}
-                  style={{
-                    gridColumn: `${start + 1} / span ${Math.min(width, 18 - start)}`,
-                  }}
-                >
-                  Active period
-                </span>
-              </div>
-            </div>
-          );
-        }
-        const productiveEndPct = timeline.productiveEnd
-          ? pct(timeline.productiveEnd)
-          : 100;
-        return (
-          <div className="timeline-row" key={action.id}>
-            <div>
-              <strong>
-                {action.quantity} {action.category}
-              </strong>
-              <small>
-                {action.kind} · {action.status}
-              </small>
-            </div>
-            <div className="timeline-grid">
-              {MONTHS.map((_, i) => (
-                <i key={i} />
-              ))}
-              {overdue && (
-                <span className="timeline-overdue-label">
-                  OVERDUE · WAS DUE {formatDate(actionStartDate(action))}
-                </span>
-              )}
-              {timeline.phases.map((phase, i) => {
-                const left = pct(phase.start);
-                const right = pct(phase.end);
-                return (
-                  <span
-                    key={phase.label}
-                    className={`phase phase-${i} ${action.kind === 'subcontract' ? 'subcontract' : ''}`}
-                    style={{
-                      left: `${left}%`,
-                      width: `${Math.max(right - left, 0.3)}%`,
-                    }}
-                    title={`${phase.label}: ${formatDate(phase.start)} – ${formatDate(phase.end)}`}
-                  />
-                );
-              })}
-              <span
-                className={`productive-segment ${action.confirmed ? '' : 'planned'}`}
-                style={{
-                  left: `${pct(timeline.productiveStart)}%`,
-                  width: `${Math.max(productiveEndPct - pct(timeline.productiveStart), 0.3)}%`,
-                }}
-                title="Productive"
-              />
-              {timeline.milestones.map((ms) => (
-                <span
-                  key={ms.label}
-                  className={`milestone ${ms.date < TODAY && !action.confirmed && !ms.final ? 'overdue' : ''} ${ms.final ? 'final' : ''}`}
-                  style={{ left: `${pct(ms.date)}%` }}
-                  title={`${ms.label}: ${formatDate(ms.date)}`}
-                />
-              ))}
-            </div>
+      {actions.length === 0 ? (
+        <div className="timeline-empty">
+          <p>
+            No capacity action is planned for {category} in {planName}. Add a
+            hire or subcontract action in the Scenario Builder to see its
+            recruiting, contracting and ramp-up lead times on this axis.
+          </p>
+          <button className="primary" onClick={openScenarioAtActions}>
+            OPEN SCENARIO BUILDER
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="timeline-months">
+            <b>CAPACITY ACTION</b>
+            {MONTHS.map((m) => (
+              <span key={m}>{m.slice(0, 3)}</span>
+            ))}
           </div>
-        );
-      })}
+          {actions.map((action) => {
+            const timeline = actionMilestones(action);
+            const overdue =
+              !action.confirmed && actionStartDate(action) < TODAY;
+            if (!timeline) {
+              const start = Math.max(0, action.fromIndex);
+              const width = Math.max(1, action.toIndex + 1 - start);
+              return (
+                <div className="timeline-row" key={action.id}>
+                  <div>
+                    <strong>
+                      {action.quantity} {action.category}
+                    </strong>
+                    <small>
+                      {action.kind} · {action.status}
+                    </small>
+                  </div>
+                  <div className="timeline-grid">
+                    {MONTHS.map((_, i) => (
+                      <i key={i} />
+                    ))}
+                    <span
+                      className={`timeline-bar ${action.kind}`}
+                      style={{
+                        gridColumn: `${start + 1} / span ${Math.min(width, 18 - start)}`,
+                      }}
+                    >
+                      Active period
+                    </span>
+                  </div>
+                </div>
+              );
+            }
+            const productiveEndPct = timeline.productiveEnd
+              ? pct(timeline.productiveEnd)
+              : 100;
+            return (
+              <div className="timeline-row" key={action.id}>
+                <div>
+                  <strong>
+                    {action.quantity} {action.category}
+                  </strong>
+                  <small>
+                    {action.kind} · {action.status}
+                  </small>
+                </div>
+                <div className="timeline-grid">
+                  {MONTHS.map((_, i) => (
+                    <i key={i} />
+                  ))}
+                  {overdue && (
+                    <span className="timeline-overdue-label">
+                      OVERDUE · WAS DUE {formatDate(actionStartDate(action))}
+                    </span>
+                  )}
+                  {timeline.phases.map((phase, i) => {
+                    const left = pct(phase.start);
+                    const right = pct(phase.end);
+                    return (
+                      <span
+                        key={phase.label}
+                        className={`phase phase-${i} ${action.kind === 'subcontract' ? 'subcontract' : ''}`}
+                        style={{
+                          left: `${left}%`,
+                          width: `${Math.max(right - left, 0.3)}%`,
+                        }}
+                        title={`${phase.label}: ${formatDate(phase.start)} – ${formatDate(phase.end)}`}
+                      />
+                    );
+                  })}
+                  <span
+                    className={`productive-segment ${action.confirmed ? '' : 'planned'}`}
+                    style={{
+                      left: `${pct(timeline.productiveStart)}%`,
+                      width: `${Math.max(productiveEndPct - pct(timeline.productiveStart), 0.3)}%`,
+                    }}
+                    title="Productive"
+                  />
+                  {timeline.milestones.map((ms) => (
+                    <span
+                      key={ms.label}
+                      className={`milestone ${ms.date < TODAY && !action.confirmed && !ms.final ? 'overdue' : ''} ${ms.final ? 'final' : ''}`}
+                      style={{ left: `${pct(ms.date)}%` }}
+                      title={`${ms.label}: ${formatDate(ms.date)}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
     </section>
   );
 }
@@ -1781,8 +1947,8 @@ function Projects({
   openProposed,
   setTab,
   setSelectedMonth,
-  selectedCategories,
-  setSelectedCategories,
+  categorySelection,
+  categoryClickThrough,
   allCategoryResults,
 }: {
   config: ScenarioConfig;
@@ -1797,8 +1963,8 @@ function Projects({
   openProposed: (id?: string) => void;
   setTab: (t: Tab) => void;
   setSelectedMonth: (v: number | null) => void;
-  selectedCategories: Set<LaborCategory>;
-  setSelectedCategories: (v: Set<LaborCategory>) => void;
+  categorySelection: CategorySelectionState;
+  categoryClickThrough: (category: LaborCategory, monthIndex?: number) => void;
   allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
 }) {
   const visibleProjects = PROJECTS.filter(
@@ -2060,10 +2226,9 @@ function Projects({
         categories={LABOR_CATEGORIES}
         months={MONTHS}
         allResults={allCategoryResults}
-        selected={selectedCategories}
-        setSelected={setSelectedCategories}
-        setTab={setTab}
-        setSelectedMonth={setSelectedMonth}
+        selection={categorySelection}
+        clickThrough={categoryClickThrough}
+        display={display}
       />
       <PortfolioOverlap
         config={config}

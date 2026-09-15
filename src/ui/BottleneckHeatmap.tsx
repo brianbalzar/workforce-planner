@@ -1,115 +1,174 @@
-import type { AnalysisResult } from '../domain/types';
-import type { LaborCategory } from '../domain/types';
-import type { Tab } from './App';
-import { monthStatus, sortCategoriesByBottleneck } from './categoryStatus';
+import { useState } from 'react';
+import type { AnalysisResult, LaborCategory } from '../domain/types';
+import { peakGap, rampColors, sortByPeakGapDesc } from './categoryStatus';
+import {
+  categoryColor,
+  selectedCategories,
+  type CategorySelectionState,
+} from './categorySelection';
+
+const EPSILON = 0.05;
 
 export function BottleneckHeatmap({
   categories,
   months,
   allResults,
-  selected,
-  setSelected,
-  setTab,
-  setSelectedMonth,
+  selection,
+  clickThrough,
+  display,
 }: {
   categories: LaborCategory[];
   months: string[];
   allResults: Map<LaborCategory, AnalysisResult>;
-  selected: Set<LaborCategory>;
-  setSelected: (next: Set<LaborCategory>) => void;
-  setTab: (t: Tab) => void;
-  setSelectedMonth: (v: number | null) => void;
+  selection: CategorySelectionState;
+  /** Clicking a category name: sets it as primary, moves the previous
+   * primary into the comparison set (capped), clears the month selection
+   * (or jumps straight to a specific month, for a cell click), and switches
+   * to the Dashboard tab. */
+  clickThrough: (category: LaborCategory, monthIndex?: number) => void;
+  display: (v: number) => string;
 }) {
-  const resultFor = (category: LaborCategory) => allResults.get(category)!;
-  const sorted = sortCategoriesByBottleneck(
-    categories.filter((c) => allResults.has(c)),
-    resultFor,
+  const [scanAll, setScanAll] = useState(false);
+  const selected = selectedCategories(selection);
+  const resultFor = (c: LaborCategory) => allResults.get(c)!;
+  const withPeak = categories
+    .filter((c) => allResults.has(c))
+    .map((c) => ({ category: c, ...peakGap(resultFor(c)) }));
+  const constrained = sortByPeakGapDesc(
+    withPeak.filter((p) => p.peak > EPSILON),
+    (p) => resultFor(p.category),
   );
-  const toggle = (category: LaborCategory) => {
-    const next = new Set(selected);
-    if (next.has(category)) {
-      if (next.size === 1) return;
-      next.delete(category);
-    } else {
-      next.add(category);
-    }
-    setSelected(next);
-  };
-  const jumpTo = (category: LaborCategory, monthIndex: number) => {
-    setSelected(new Set([category]));
-    setSelectedMonth(monthIndex);
-    setTab('dashboard');
-  };
-  const jumpToMonth = (monthIndex: number) => {
-    setSelectedMonth(monthIndex);
-    setTab('dashboard');
-  };
+  const clear = withPeak.filter((p) => p.peak <= EPSILON);
+  const rows = scanAll ? [...constrained, ...clear] : constrained;
+  const globalMax = Math.max(1, ...withPeak.map((p) => p.peak));
+  const globalPeak = Math.max(0, ...withPeak.map((p) => p.peak));
+
   return (
-    <section className="chart-card overlap-card" data-tour="bottleneck-heatmap">
+    <section className="chart-card scan-card" data-tour="bottleneck-heatmap">
       <div className="card-heading">
         <div>
           <span>ALL-CATEGORIES BOTTLENECK SCAN</span>
-          <h2>Every labor category, worst first</h2>
+          <h2>
+            {constrained.length
+              ? `${constrained.length} of ${categories.length} labor categories are constrained in this window`
+              : 'No labor category is constrained in this window'}
+          </h2>
         </div>
       </div>
-      <div className="overlap-scroll">
-        <div className="overlap-row overlap-months">
+      <p className="scan-sub-line">
+        Unresolved gap after every planned hire, subcontract and overtime hour,
+        for each category in this plan. Click a category to open it on the
+        dashboard. Blank months are covered.
+      </p>
+      <div className="scan-legend">
+        <span>0</span>
+        {[0, 1, 2, 3, 4].map((bucket) => (
+          <span
+            key={bucket}
+            className="scan-legend-swatch"
+            style={{ background: rampColors((bucket + 0.5) / 5)!.background }}
+          />
+        ))}
+        <span className="scan-legend-label">
+          {display(globalPeak)} UNRESOLVED
+        </span>
+        <button
+          type="button"
+          className="scan-toggle"
+          onClick={() => setScanAll((v) => !v)}
+        >
+          {scanAll
+            ? 'SHOW CONSTRAINED ONLY'
+            : `SHOW ALL ${categories.length} CATEGORIES`}
+        </button>
+      </div>
+      <div className="scan-scroll">
+        <div className="scan-grid scan-grid-header">
           <div />
           {months.map((m, i) => (
-            <button
-              key={m}
-              className="overlap-month"
-              aria-label={`Inspect ${m} on the bottleneck dashboard`}
-              onClick={() => jumpToMonth(i)}
-            >
-              {m.slice(0, 3)}
-            </button>
+            <div key={m} className="scan-month-header">
+              <span className="scan-year">
+                {(i === 0 || m.startsWith('Jan')) && m.split(' ')[1]}
+              </span>
+              <span>{m.slice(0, 3)}</span>
+            </div>
           ))}
+          <div className="scan-peak-header">PEAK</div>
         </div>
-        {sorted.map((category) => {
+        {rows.map(({ category, peak, index: peakIndex }) => {
           const result = resultFor(category);
+          const isPrimary = category === selection.category;
+          const isCompared = !isPrimary && selected.includes(category);
+          const accent = isPrimary
+            ? '#161514'
+            : isCompared
+              ? categoryColor(selected.indexOf(category))
+              : 'transparent';
+          const tag = isPrimary
+            ? { label: 'PRIMARY', color: '#0082FF' }
+            : isCompared
+              ? { label: 'COMPARED', color: '#6E6C68' }
+              : peak > EPSILON
+                ? {
+                    label: `${result.gap.filter((g) => g > EPSILON).length} MONTHS`,
+                    color: '#B91D1D',
+                  }
+                : { label: 'CLEAR', color: '#009500' };
           return (
-            <div className="overlap-row overlap-heat-row" key={category}>
-              <div className="overlap-row-label">
-                <label className="heat-row-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(category)}
-                    disabled={selected.size === 1 && selected.has(category)}
-                    onChange={() => toggle(category)}
-                  />
-                  <strong>{category}</strong>
-                </label>
+            <div
+              className={`scan-grid scan-row${isPrimary ? ' is-primary' : ''}`}
+              key={category}
+            >
+              <div className="scan-row-label">
+                <span className="scan-accent" style={{ background: accent }} />
+                <button
+                  type="button"
+                  className={`text-link${isPrimary ? ' bold' : ''}`}
+                  onClick={() => clickThrough(category)}
+                >
+                  {category}
+                </button>
+                <small style={{ color: tag.color }}>{tag.label}</small>
               </div>
-              {months.map((m, i) => {
-                const status = monthStatus(result, i);
-                const need = result.scenario[i];
+              {result.gap.map((g, i) => {
+                const t = g / globalMax;
+                const colors = rampColors(t);
+                const isPeak = i === peakIndex && g > EPSILON;
                 return (
                   <button
-                    key={m}
-                    className={`overlap-heat-cell status-${status}`}
-                    style={{ gridColumnStart: i + 2, gridColumnEnd: i + 3 }}
-                    title={`${category} · ${m}: ${need.toFixed(1)} needed`}
-                    onClick={() => jumpTo(category, i)}
+                    type="button"
+                    key={months[i]}
+                    className={`scan-cell${isPeak ? ' peak' : ''}`}
+                    style={
+                      colors
+                        ? { background: colors.background, color: colors.color }
+                        : undefined
+                    }
+                    title={
+                      g > EPSILON
+                        ? `${months[i]} — ${category} · ${g.toFixed(1)} FTE unresolved`
+                        : `${months[i]} — ${category} · covered by planned capacity`
+                    }
+                    onClick={() => clickThrough(category, i)}
                   >
-                    {need > 0.05 ? need.toFixed(1) : '—'}
+                    {g > EPSILON ? g.toFixed(1) : ''}
                   </button>
                 );
               })}
+              <div className="scan-peak-cell">
+                <b>{peak > EPSILON ? display(peak) : '—'}</b>
+                <small>{peak > EPSILON ? months[peakIndex] : ''}</small>
+              </div>
             </div>
           );
         })}
+        {!scanAll && clear.length > 0 && (
+          <div className="scan-clear-footer">
+            <span>NO UNRESOLVED GAP</span>
+            <span>{clear.map((p) => p.category).join(' · ')}</span>
+          </div>
+        )}
       </div>
-      <p className="info-note heat-legend">
-        Checking a row here selects it in the LABOR CATEGORY picker above. Click
-        a cell to jump to that category and month on the Dashboard.
-        <span className="heat-legend-swatch status-good" />
-        Existing staff and/or the pre-fab shop
-        <span className="heat-legend-swatch status-watch" />
-        Needs planned hires, subcontract, or overtime
-        <span className="heat-legend-swatch status-critical" />
-        Unresolved gap
-      </p>
     </section>
   );
 }

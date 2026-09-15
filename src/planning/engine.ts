@@ -395,6 +395,108 @@ export function metrics(r: AnalysisResult) {
   };
 }
 
+/**
+ * When combining categories with different capacity assumptions under
+ * Hours or Labor Cost, each category's values must be scaled by a weight so
+ * a single unit conversion against the primary category's own rates is
+ * correct — People needs no weighting since it's category-agnostic.
+ */
+export function categoryUnitWeight(
+  unit: Unit,
+  primary: { productiveHours: number; hourlyRate: number },
+  category: { productiveHours: number; hourlyRate: number },
+): number {
+  if (unit === 'Hours')
+    return category.productiveHours / primary.productiveHours;
+  if (unit === 'Labor Cost')
+    return (
+      (category.productiveHours * category.hourlyRate) /
+      (primary.productiveHours * primary.hourlyRate)
+    );
+  return 1;
+}
+
+/**
+ * Pools two or more analyze() results (e.g. several labor categories, or
+ * several departments) into one, per the design handoff's `sumSeries`.
+ * Demand arrays and gap are scaled by each entry's own weight and summed;
+ * capacity arrays are additionally clamped by that entry's own
+ * total-vs-scenario ratio first, so capacity beyond what that entry's own
+ * demand needed is never counted — a surplus in one category/department
+ * never covers a shortage in another. `gap` is summed directly (scaled,
+ * never recomputed from the summed totals).
+ */
+export function combineWeightedResults(
+  entries: Array<{ result: AnalysisResult; weight: number }>,
+): AnalysisResult {
+  if (entries.length === 1 && entries[0].weight === 1) return entries[0].result;
+  const sums = {
+    hard: zeros(),
+    expected: zeros(),
+    scenario: zeros(),
+    proposed: zeros(),
+    prefab: zeros(),
+    existing: zeros(),
+    confirmedHires: zeros(),
+    plannedHires: zeros(),
+    subcontract: zeros(),
+    overtime: zeros(),
+    total: zeros(),
+    gap: zeros(),
+    unconfirmed: zeros(),
+  };
+  const driverMaps = Array.from(
+    { length: N },
+    () => new Map<string, { name: string; type: string; fte: number }>(),
+  );
+  entries.forEach(({ result: r, weight: w }) => {
+    for (let i = 0; i < N; i++) {
+      const f =
+        r.total[i] > r.scenario[i] && r.total[i] > 0
+          ? r.scenario[i] / r.total[i]
+          : 1;
+      sums.hard[i] += r.hard[i] * w;
+      sums.expected[i] += r.expected[i] * w;
+      sums.scenario[i] += r.scenario[i] * w;
+      sums.proposed[i] += r.proposed[i] * w;
+      sums.prefab[i] += r.prefab[i] * f * w;
+      sums.existing[i] += r.existing[i] * f * w;
+      sums.confirmedHires[i] += r.confirmedHires[i] * f * w;
+      sums.plannedHires[i] += r.plannedHires[i] * f * w;
+      sums.subcontract[i] += r.subcontract[i] * f * w;
+      sums.overtime[i] += r.overtime[i] * f * w;
+      sums.total[i] += r.total[i] * f * w;
+      sums.gap[i] += r.gap[i] * w;
+      sums.unconfirmed[i] += r.unconfirmed[i] * f * w;
+      r.drivers[i].forEach((d) => {
+        const existing = driverMaps[i].get(d.name);
+        const fte = d.fte * w;
+        if (existing) existing.fte += fte;
+        else driverMaps[i].set(d.name, { ...d, fte });
+      });
+    }
+  });
+  const drivers = driverMaps.map((m) =>
+    [...m.values()].sort((a, b) => b.fte - a.fte),
+  );
+  return {
+    hard: sums.hard.map(round3),
+    expected: sums.expected.map(round3),
+    scenario: sums.scenario.map(round3),
+    proposed: sums.proposed.map(round3),
+    drivers,
+    prefab: sums.prefab.map(round3),
+    existing: sums.existing.map(round3),
+    confirmedHires: sums.confirmedHires.map(round3),
+    plannedHires: sums.plannedHires.map(round3),
+    subcontract: sums.subcontract.map(round3),
+    overtime: sums.overtime.map(round3),
+    total: sums.total.map(round3),
+    gap: sums.gap.map(round3),
+    unconfirmed: sums.unconfirmed.map(round3),
+  };
+}
+
 export function formatValue(
   fte: number,
   unit: Unit,
@@ -541,20 +643,29 @@ export const formatDate = (date: Date) =>
     year: 'numeric',
   });
 
-export function recommendations(r: AnalysisResult) {
+/** Contiguous runs of months where `values[i] > epsilon` — a gap window. */
+export function contiguousWindows(
+  values: number[],
+  epsilon = 0.05,
+): Array<{ start: number; end: number; values: number[] }> {
   const groups: Array<{ start: number; end: number; values: number[] }> = [];
   let active: null | { start: number; end: number; values: number[] } = null;
-  r.gap.forEach((g, i) => {
-    if (g > 0.05) {
+  values.forEach((v, i) => {
+    if (v > epsilon) {
       if (!active) active = { start: i, end: i, values: [] };
       active.end = i;
-      active.values.push(g);
+      active.values.push(v);
     } else if (active) {
       groups.push(active);
       active = null;
     }
   });
   if (active) groups.push(active);
+  return groups;
+}
+
+export function recommendations(r: AnalysisResult) {
+  const groups = contiguousWindows(r.gap);
   return groups.map((group) => {
     const sorted = [...group.values].sort((a, b) => a - b),
       median = sorted[Math.floor(sorted.length / 2)],

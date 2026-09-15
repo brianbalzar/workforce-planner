@@ -1,81 +1,57 @@
 import type { AnalysisResult } from '../domain/types';
 
-export type CategoryStatus = 'none' | 'good' | 'watch' | 'critical';
-
-// Matches PortfolioOverlap's existing heat-row classification (App.tsx) —
-// kept here so the heatmap, the picker widget, and PortfolioOverlap all
-// agree on what "critical" means instead of drifting apart per component.
-export const STATUS_EPSILON = 0.05;
-
-export function monthStatus(result: AnalysisResult, i: number): CategoryStatus {
-  const need = result.scenario[i];
-  if (need <= STATUS_EPSILON) return 'none';
-  if (need <= result.existing[i] + result.prefab[i] + STATUS_EPSILON)
-    return 'good';
-  if (need <= result.total[i] + STATUS_EPSILON) return 'watch';
-  return 'critical';
-}
-
-const STATUS_ORDER: Record<CategoryStatus, number> = {
-  none: 0,
-  good: 1,
-  watch: 2,
-  critical: 3,
-};
-
-export function worstStatus(result: AnalysisResult): CategoryStatus {
-  let worst: CategoryStatus = 'none';
-  for (let i = 0; i < result.scenario.length; i++) {
-    const status = monthStatus(result, i);
-    if (STATUS_ORDER[status] > STATUS_ORDER[worst]) worst = status;
-  }
-  return worst;
-}
-
-export function criticalMonthCount(result: AnalysisResult): number {
-  let count = 0;
-  for (let i = 0; i < result.scenario.length; i++)
-    if (monthStatus(result, i) === 'critical') count++;
-  return count;
-}
-
-/** Sorts categories worst-first, breaking ties by count of critical months. */
-export function sortCategoriesByBottleneck<T extends string>(
-  categories: T[],
-  resultFor: (category: T) => AnalysisResult,
-): T[] {
-  return [...categories].sort((a, b) => {
-    const ra = resultFor(a),
-      rb = resultFor(b);
-    const order = STATUS_ORDER[worstStatus(rb)] - STATUS_ORDER[worstStatus(ra)];
-    if (order !== 0) return order;
-    return criticalMonthCount(rb) - criticalMonthCount(ra);
+/** Peak unresolved gap across the window, and the month index it peaks in. */
+export function peakGap(result: AnalysisResult): {
+  peak: number;
+  index: number;
+} {
+  let peak = 0,
+    index = -1;
+  result.gap.forEach((g, i) => {
+    if (g > peak) {
+      peak = g;
+      index = i;
+    }
   });
+  return { peak, index };
 }
 
-// A fixed categorical palette, keyed by a category's index in LABOR_CATEGORIES
-// (stable for the life of a loaded dataset). Reused by the picker's status
-// dots/sparklines and the overlay chart's lines so a category's color stays
-// consistent everywhere it appears.
-const CATEGORY_PALETTE = [
-  '#0068cc',
-  '#8e2da8',
-  '#009500',
-  '#b8740b',
-  '#b91d1d',
-  '#1f8a70',
-  '#6e4b9e',
-  '#c2185b',
-  '#5d4037',
-  '#00838f',
-  '#7c8b00',
-  '#c9622a',
-  '#3949ab',
-  '#00695c',
-  '#8d6e00',
-  '#455a64',
-];
+/** Sorts categories by peak unresolved gap, worst first. */
+export function sortByPeakGapDesc<T>(
+  items: T[],
+  resultFor: (item: T) => AnalysisResult,
+): T[] {
+  return [...items].sort(
+    (a, b) => peakGap(resultFor(b)).peak - peakGap(resultFor(a)).peak,
+  );
+}
 
-export function categoryColor(index: number): string {
-  return CATEGORY_PALETTE[index % CATEGORY_PALETTE.length];
+export type RampBucket = -1 | 0 | 1 | 2 | 3 | 4;
+
+/** The five-step solid ramp the scan/heat-strip/gap-matrix cells share:
+ * `t = gap / globalMax`. -1 means covered (no color, blank cell). */
+export function rampBucket(t: number): RampBucket {
+  if (t <= 0) return -1;
+  if (t < 0.2) return 0;
+  if (t < 0.4) return 1;
+  if (t < 0.62) return 2;
+  if (t < 0.82) return 3;
+  return 4;
+}
+
+export const RAMP_BACKGROUND = [
+  '#FCEDED',
+  '#F7D2D2',
+  '#F0B0B0',
+  '#C82F32',
+  '#8F1416',
+];
+export const RAMP_TEXT = ['#7A1414', '#7A1414', '#7A1414', '#fff', '#fff'];
+
+export function rampColors(
+  t: number,
+): { background: string; color: string } | null {
+  const bucket = rampBucket(t);
+  if (bucket < 0) return null;
+  return { background: RAMP_BACKGROUND[bucket], color: RAMP_TEXT[bucket] };
 }
