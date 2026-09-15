@@ -86,6 +86,10 @@ import {
 } from '../planning/engine';
 import { loadPlanState, resetPlans, savePlans } from '../persistence/planStore';
 import { GuidedTour, TOUR_SEEN_KEY } from './GuidedTour';
+import { LaborCategoryPicker } from './LaborCategoryPicker';
+import { BottleneckHeatmap } from './BottleneckHeatmap';
+import { CategoryOverlayGapChart } from './CategoryOverlayGapChart';
+import { sortCategoriesByBottleneck } from './categoryStatus';
 
 export type Tab =
   | 'dashboard'
@@ -162,9 +166,15 @@ export function App() {
   const [live, setLive] = useState<ScenarioConfig>(() => clone(initial.config));
   const [undo, setUndo] = useState<ScenarioConfig[]>([]);
   const [tab, setTab] = useState<Tab>('dashboard');
-  const [category, setCategory] = useState<LaborCategory>(
-    LABOR_CATEGORIES.includes('Plumber') ? 'Plumber' : LABOR_CATEGORIES[0],
+  const [selectedCategories, setSelectedCategories] = useState<
+    Set<LaborCategory>
+  >(
+    () =>
+      new Set([
+        LABOR_CATEGORIES.includes('Plumber') ? 'Plumber' : LABOR_CATEGORIES[0],
+      ]),
   );
+  const setCategory = (c: LaborCategory) => setSelectedCategories(new Set([c]));
   const [department, setDepartment] = useState(DEPARTMENTS[0]);
   const [unit, setUnit] = useState<Unit>('People');
   const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
@@ -198,9 +208,32 @@ export function App() {
     }
   });
   const plan = plans.find((p) => p.id === planId) || plans[0];
+  // Every category's analyze() result, computed once here rather than per
+  // component, so the heatmap and the picker widget's status dots/sparklines
+  // never recompute what the other already has.
+  const allCategoryResults = useMemo(
+    () =>
+      new Map(
+        LABOR_CATEGORIES.map((cat) => [cat, analyze(live, cat, department)]),
+      ),
+    [live, department],
+  );
+  // Every single-category consumer (the main bottleneck chart, assumptions,
+  // Capacity, ProposedModal, CompareModal, etc.) still needs one category —
+  // use the worst-bottleneck category among those checked, so checking just
+  // one behaves exactly like today and checking several still shows the most
+  // urgent one everywhere that can only show one.
+  const category = useMemo(
+    () =>
+      sortCategoriesByBottleneck([...selectedCategories], (c) =>
+        allCategoryResults.get(c)!,
+      )[0] ?? LABOR_CATEGORIES[0],
+    [selectedCategories, allCategoryResults],
+  );
   const result = useMemo(
-    () => analyze(live, category, department),
-    [live, category, department],
+    () =>
+      allCategoryResults.get(category) ?? analyze(live, category, department),
+    [allCategoryResults, category, live, department],
   );
   const summary = useMemo(() => metrics(result), [result]);
   const savedResult = useMemo(
@@ -562,8 +595,9 @@ export function App() {
         <ControlBar
           department={department}
           setDepartment={setDepartment}
-          category={category}
-          setCategory={setCategory}
+          selectedCategories={selectedCategories}
+          setSelectedCategories={setSelectedCategories}
+          allCategoryResults={allCategoryResults}
           unit={unit}
           setUnit={setUnit}
           plans={plans}
@@ -599,6 +633,8 @@ export function App() {
             actions={live.actions}
             dirty={dirty}
             savedScenario={savedResult.scenario}
+            selectedCategories={selectedCategories}
+            allCategoryResults={allCategoryResults}
           />
         )}
         {tab === 'projects' && (
@@ -615,6 +651,9 @@ export function App() {
             openProposed={openProposed}
             setTab={setTab}
             setSelectedMonth={setSelectedMonth}
+            selectedCategories={selectedCategories}
+            setSelectedCategories={setSelectedCategories}
+            allCategoryResults={allCategoryResults}
           />
         )}
         {tab === 'scenario' && (
@@ -891,8 +930,9 @@ function CapacityActionMenu({
 function ControlBar(p: {
   department: string;
   setDepartment: (v: string) => void;
-  category: LaborCategory;
-  setCategory: (v: LaborCategory) => void;
+  selectedCategories: Set<LaborCategory>;
+  setSelectedCategories: (v: Set<LaborCategory>) => void;
+  allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
   unit: Unit;
   setUnit: (v: Unit) => void;
   plans: WorkforcePlan[];
@@ -918,16 +958,12 @@ function ControlBar(p: {
           ))}
         </select>
       </Field>
-      <Field label="LABOR CATEGORY">
-        <select
-          value={p.category}
-          onChange={(e) => p.setCategory(e.target.value as LaborCategory)}
-        >
-          {LABOR_CATEGORIES.map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-      </Field>
+      <LaborCategoryPicker
+        categories={LABOR_CATEGORIES}
+        allResults={p.allCategoryResults}
+        selected={p.selectedCategories}
+        setSelected={p.setSelectedCategories}
+      />
       <Field
         label="PLANNING WINDOW"
         hint="Rolling 18-month window supplied by the published data."
@@ -1028,6 +1064,8 @@ function Dashboard({
   actions,
   dirty,
   savedScenario,
+  selectedCategories,
+  allCategoryResults,
 }: {
   result: ReturnType<typeof analyze>;
   summary: ReturnType<typeof metrics>;
@@ -1041,6 +1079,8 @@ function Dashboard({
   actions: CapacityAction[];
   dirty: boolean;
   savedScenario: number[];
+  selectedCategories: Set<LaborCategory>;
+  allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
 }) {
   const data = MONTHS.map((month, i) => ({
     month,
@@ -1135,6 +1175,15 @@ function Dashboard({
           detail={`${plan.name} · ${plan.status} · ${summary.unconfirmedPeak.toFixed(1)} FTE unconfirmed at peak.`}
         />
       </section>
+      {selectedCategories.size > 1 && (
+        <p className="info-note multi-category-note">
+          {selectedCategories.size} labor categories selected — the tiles above
+          and the chart below still reflect <strong>{category}</strong>, the
+          worst bottleneck among them. Use the overlay chart further down, or
+          the all-categories heatmap on the Projects tab, to compare across all
+          selected categories.
+        </p>
+      )}
       <section className="chart-card" data-tour="bottleneck-chart">
         <div className="card-heading">
           <div>
@@ -1304,12 +1353,21 @@ function Dashboard({
           </ResponsiveContainer>
         </div>
       </section>
-      <MonthlyCompositionChart
-        result={result}
-        display={display}
-        selectedMonth={selectedMonth}
-        setSelectedMonth={setSelectedMonth}
-      />
+      {selectedCategories.size > 1 ? (
+        <CategoryOverlayGapChart
+          categories={LABOR_CATEGORIES}
+          selected={selectedCategories}
+          months={MONTHS}
+          allResults={allCategoryResults}
+        />
+      ) : (
+        <MonthlyCompositionChart
+          result={result}
+          display={display}
+          selectedMonth={selectedMonth}
+          setSelectedMonth={setSelectedMonth}
+        />
+      )}
       {selectedMonth !== null && (
         <MonthDetail
           index={selectedMonth}
@@ -1723,6 +1781,9 @@ function Projects({
   openProposed,
   setTab,
   setSelectedMonth,
+  selectedCategories,
+  setSelectedCategories,
+  allCategoryResults,
 }: {
   config: ScenarioConfig;
   department: string;
@@ -1736,6 +1797,9 @@ function Projects({
   openProposed: (id?: string) => void;
   setTab: (t: Tab) => void;
   setSelectedMonth: (v: number | null) => void;
+  selectedCategories: Set<LaborCategory>;
+  setSelectedCategories: (v: Set<LaborCategory>) => void;
+  allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
 }) {
   const visibleProjects = PROJECTS.filter(
     (project) => project.department === department,
@@ -1992,6 +2056,15 @@ function Projects({
           </tbody>
         </table>
       </div>
+      <BottleneckHeatmap
+        categories={LABOR_CATEGORIES}
+        months={MONTHS}
+        allResults={allCategoryResults}
+        selected={selectedCategories}
+        setSelected={setSelectedCategories}
+        setTab={setTab}
+        setSelectedMonth={setSelectedMonth}
+      />
       <PortfolioOverlap
         config={config}
         department={department}
