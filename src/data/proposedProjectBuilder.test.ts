@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { ATLAS, LABOR_CATEGORIES } from './sampleData';
 import {
   createProposedProject,
+  hasDriftedFromArchetype,
+  resetProposedProjectToArchetype,
   resizeProposedProjectSchedule,
 } from './proposedProjectBuilder';
 
@@ -87,5 +89,117 @@ describe('proposed project builder', () => {
 
     expect(project.workPackages).toHaveLength(1);
     expect(project.workPackages[0].curve.some((value) => value > 0)).toBe(true);
+  });
+});
+
+describe('archetype drift / reset', () => {
+  const archetype = {
+    id: 'general',
+    name: 'General',
+    projectType: 'General',
+    defaultDurationMonths: 4,
+    staffingCurve: 'Standard ramp / peak / taper' as const,
+    costMix: { material: 50, internalLabor: 35, subcontract: 10, other: 5 },
+    laborAllocation: { Plumber: 70, Pipefitter: 30 },
+  };
+
+  const buildProject = () =>
+    createProposedProject(
+      {
+        name: 'General Opportunity',
+        department: ATLAS.department,
+        archetypeId: 'general',
+        value: 8,
+        startIndex: 1,
+        endIndex: 4,
+        probability: 50,
+      },
+      archetype,
+      undefined,
+      LABOR_CATEGORIES,
+      'general-opportunity',
+      18,
+    );
+
+  it('reports no drift for a freshly created, untouched project', () => {
+    const project = buildProject();
+    expect(hasDriftedFromArchetype(project, archetype, LABOR_CATEGORIES)).toBe(
+      false,
+    );
+  });
+
+  it('detects drift in duration, cost mix, and labor allocation independently', () => {
+    const project = buildProject();
+    expect(
+      hasDriftedFromArchetype(
+        { ...project, durationMonths: project.durationMonths + 1 },
+        archetype,
+        LABOR_CATEGORIES,
+      ),
+    ).toBe(true);
+    expect(
+      hasDriftedFromArchetype(
+        {
+          ...project,
+          costMix: {
+            ...project.costMix,
+            material: project.costMix.material + 1,
+          },
+        },
+        archetype,
+        LABOR_CATEGORIES,
+      ),
+    ).toBe(true);
+    expect(
+      hasDriftedFromArchetype(
+        {
+          ...project,
+          laborAllocation: { ...project.laborAllocation, Plumber: 1 },
+        },
+        archetype,
+        LABOR_CATEGORIES,
+      ),
+    ).toBe(true);
+  });
+
+  it('clears drift when a value is edited back to the archetype number', () => {
+    const project = buildProject();
+    const edited = {
+      ...project,
+      costMix: { ...project.costMix, material: project.costMix.material + 1 },
+    };
+    expect(hasDriftedFromArchetype(edited, archetype, LABOR_CATEGORIES)).toBe(
+      true,
+    );
+    const restored = { ...edited, costMix: { ...project.costMix } };
+    expect(hasDriftedFromArchetype(restored, archetype, LABOR_CATEGORIES)).toBe(
+      false,
+    );
+  });
+
+  it('resetProposedProjectToArchetype rebuilds duration/curve/costMix/laborAllocation and clears drift', () => {
+    const project = buildProject();
+    const drifted = {
+      ...project,
+      durationMonths: 9,
+      costMix: { material: 10, internalLabor: 80, subcontract: 5, other: 5 },
+      laborAllocation: {
+        ...project.laborAllocation,
+        Plumber: 1,
+        Pipefitter: 99,
+      },
+    };
+    const reset = resetProposedProjectToArchetype(
+      drifted,
+      archetype,
+      LABOR_CATEGORIES,
+      18,
+    );
+    expect(hasDriftedFromArchetype(reset, archetype, LABOR_CATEGORIES)).toBe(
+      false,
+    );
+    // Untouched fields survive the reset.
+    expect(reset.name).toBe(project.name);
+    expect(reset.value).toBe(project.value);
   });
 });

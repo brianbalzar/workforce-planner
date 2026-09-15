@@ -38,7 +38,7 @@ function genericShape(curve: StaffingCurve, duration: number) {
   return resample([0.2, 0.4, 0.6, 0.8, 1, 1, 0.8, 0.5, 0.2], duration);
 }
 
-function normalizeAllocation(
+export function normalizeAllocation(
   allocation: Partial<Record<LaborCategory, number>>,
   laborCategories: LaborCategory[],
 ) {
@@ -108,7 +108,7 @@ function scaledTemplatePackages(
   });
 }
 
-function genericPackage(
+export function genericPackage(
   archetype: ProposedProjectArchetype,
   projectId: string,
   startIndex: number,
@@ -171,6 +171,7 @@ export function createProposedProject(
     name: intake.name.trim(),
     department: intake.department,
     projectType: archetype.projectType,
+    archetypeId: archetype.id,
     value: Math.round(Math.max(0, intake.value) * 100) / 100,
     startIndex: intake.startIndex,
     durationMonths: duration,
@@ -182,6 +183,76 @@ export function createProposedProject(
       laborCategories,
     ),
     workPackages,
+  };
+}
+
+/**
+ * Drift is computed by comparing duration, curve, every cost-mix key and
+ * every labor-allocation key against the archetype's own values — not a
+ * dirty flag — so editing a value back to the archetype's number clears the
+ * ADJUSTED badge. Values are compared exactly: costMix is stored as a
+ * verbatim clone of the archetype's own object at creation, and
+ * laborAllocation is normalized through the same pure normalizeAllocation()
+ * both at creation and here, so an untouched project always compares equal.
+ */
+export function hasDriftedFromArchetype(
+  project: Pick<
+    ProposedProject,
+    'durationMonths' | 'staffingCurve' | 'costMix' | 'laborAllocation'
+  >,
+  archetype: ProposedProjectArchetype,
+  laborCategories: LaborCategory[],
+): boolean {
+  if (project.durationMonths !== archetype.defaultDurationMonths) return true;
+  if (project.staffingCurve !== archetype.staffingCurve) return true;
+  const costKeys = [
+    'material',
+    'internalLabor',
+    'subcontract',
+    'other',
+  ] as const;
+  if (costKeys.some((key) => project.costMix[key] !== archetype.costMix[key]))
+    return true;
+  const archetypeAllocation = normalizeAllocation(
+    archetype.laborAllocation,
+    laborCategories,
+  );
+  return laborCategories.some(
+    (category) =>
+      (project.laborAllocation[category] ?? 0) !==
+      (archetypeAllocation[category] ?? 0),
+  );
+}
+
+/** "Reset to archetype" — rebuilds the project's duration, curve, cost mix
+ * and labor allocation back to the archetype's own averages, discarding any
+ * edits to those fields (name, department, value, start, probability are
+ * left untouched). */
+export function resetProposedProjectToArchetype(
+  project: ProposedProject,
+  archetype: ProposedProjectArchetype,
+  laborCategories: LaborCategory[],
+  months: number,
+): ProposedProject {
+  const duration = archetype.defaultDurationMonths;
+  return {
+    ...project,
+    durationMonths: duration,
+    staffingCurve: archetype.staffingCurve,
+    costMix: structuredClone(archetype.costMix),
+    laborAllocation: normalizeAllocation(
+      archetype.laborAllocation,
+      laborCategories,
+    ),
+    workPackages: [
+      genericPackage(
+        archetype,
+        project.id,
+        project.startIndex,
+        duration,
+        months,
+      ),
+    ],
   };
 }
 

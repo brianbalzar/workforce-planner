@@ -52,6 +52,8 @@ import {
 import { LABOR_SOURCE_MAP } from '../data/sampleData';
 import {
   createProposedProject,
+  hasDriftedFromArchetype,
+  resetProposedProjectToArchetype,
   resizeProposedProjectSchedule,
   type ProposedProjectIntake,
 } from '../data/proposedProjectBuilder';
@@ -61,12 +63,14 @@ import type {
   LaborCategory,
   PlanStatus,
   Project,
+  ProposedProjectArchetype,
   ScenarioConfig,
   StaffingCurve,
   Unit,
   WorkforcePlan,
   WorkPackage,
 } from '../domain/types';
+import { comparableProjectCount, leadingTrades } from '../data/archetypeMeta';
 import {
   actionMilestones,
   actionStartDate,
@@ -3983,6 +3987,54 @@ function SoftBacklogModal({
   );
 }
 
+function ArchetypePicker({
+  archetypes,
+  selectedId,
+  onSelect,
+}: {
+  archetypes: ProposedProjectArchetype[];
+  selectedId: string;
+  onSelect: (archetype: ProposedProjectArchetype) => void;
+}) {
+  return (
+    <div className="archetype-picker">
+      <span className="field-label">START FROM A REAL PROJECT TYPE</span>
+      <div className="archetype-grid">
+        {archetypes.map((item) => {
+          const trades = leadingTrades(item);
+          const comparable = comparableProjectCount(item);
+          const selected = item.id === selectedId;
+          return (
+            <button
+              type="button"
+              key={item.id}
+              className={`archetype-card${selected ? ' selected' : ''}`}
+              onClick={() => onSelect(item)}
+            >
+              <strong>{item.name}</strong>
+              <small>
+                {comparable !== null
+                  ? `${comparable} comparable projects · `
+                  : ''}
+                {item.defaultDurationMonths} months ·{' '}
+                {item.costMix.internalLabor}% internal labor
+              </small>
+              {trades.length > 0 && (
+                <em>
+                  Leads with{' '}
+                  {trades
+                    .map(([category, share]) => `${category} ${share}%`)
+                    .join(', ')}
+                </em>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ProposedIntakeModal({
   draft,
   setDraft,
@@ -4028,10 +4080,23 @@ function ProposedIntakeModal({
           </button>
         </header>
         <div className="proposed-intake-body">
+          <ArchetypePicker
+            archetypes={PROPOSED_PROJECT_ARCHETYPES}
+            selectedId={draft.archetypeId}
+            onSelect={(nextArchetype) =>
+              update({
+                archetypeId: nextArchetype.id,
+                endIndex: Math.min(
+                  MONTHS.length - 1,
+                  draft.startIndex + nextArchetype.defaultDurationMonths - 1,
+                ),
+              })
+            }
+          />
           <p className="section-copy">
-            The selected project type supplies the initial cost, labor, and
-            staffing assumptions. You can review and change them on the next
-            screen.
+            {archetype
+              ? `Cost mix, labor allocation, duration and curve are the ${archetype.name} averages. Every field stays editable on the next screen.`
+              : 'Pick the archetype closest to this project. It fills cost mix, labor allocation, duration and curve from real comparable projects — every field stays editable.'}
           </p>
           <div className="form-grid">
             <Field label="PROJECT NAME">
@@ -4041,33 +4106,8 @@ function ProposedIntakeModal({
                 onChange={(event) => update({ name: event.target.value })}
               />
             </Field>
-            <Field label="PROJECT TYPE / ASSUMPTION SET">
-              <select
-                value={draft.archetypeId}
-                onChange={(event) => {
-                  const nextArchetype = PROPOSED_PROJECT_ARCHETYPES.find(
-                    (item) => item.id === event.target.value,
-                  );
-                  update({
-                    archetypeId: event.target.value,
-                    endIndex: Math.min(
-                      MONTHS.length - 1,
-                      draft.startIndex +
-                        (nextArchetype?.defaultDurationMonths ?? 1) -
-                        1,
-                    ),
-                  });
-                }}
-              >
-                {PROPOSED_PROJECT_ARCHETYPES.length === 0 && (
-                  <option value="">No assumption sets available</option>
-                )}
-                {PROPOSED_PROJECT_ARCHETYPES.map((item) => (
-                  <option value={item.id} key={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
+            <Field label="PROJECT ARCHETYPE">
+              <input readOnly value={archetype?.name ?? 'None selected'} />
             </Field>
             <Field label="DEPARTMENT">
               <select
@@ -4212,6 +4252,28 @@ function ProposedModal({
     config.proposedProjects[0];
   const dialogRef = useDialogA11y<HTMLElement>(() => close(true));
   if (!a) return null;
+  const archetype = PROPOSED_PROJECT_ARCHETYPES.find(
+    (item) => item.id === a.archetypeId,
+  );
+  const drifted = archetype
+    ? hasDriftedFromArchetype(a, archetype, LABOR_CATEGORIES)
+    : false;
+  const resetToArchetype = () => {
+    if (!archetype) return;
+    setLive((c) => ({
+      ...c,
+      proposedProjects: c.proposedProjects.map((project) =>
+        project.id === a.id
+          ? resetProposedProjectToArchetype(
+              project,
+              archetype,
+              LABOR_CATEGORIES,
+              MONTHS.length,
+            )
+          : project,
+      ),
+    }));
+  };
   const issues = [
     ...(!a.name.trim() ? ['Project name is required.'] : []),
     ...(a.value <= 0 ? ['Contract value must be greater than zero.'] : []),
@@ -4259,9 +4321,31 @@ function ProposedModal({
                   onChange={(e) => update('name', e.target.value)}
                 />
               </Field>
-              <Field label="PROJECT TYPE / ASSUMPTION SET">
-                <input readOnly value={a.projectType} />
-              </Field>
+              <div className="field archetype-status-field">
+                <div className="field-label-row">
+                  <span className="field-label">PROJECT ARCHETYPE</span>
+                  {archetype && drifted && (
+                    <>
+                      <span className="adjusted-badge">ADJUSTED</span>
+                      <button
+                        type="button"
+                        className="text-link"
+                        onClick={resetToArchetype}
+                      >
+                        Reset to archetype
+                      </button>
+                    </>
+                  )}
+                </div>
+                <input readOnly value={archetype?.name ?? a.projectType} />
+                <small className="field-hint">
+                  {!archetype
+                    ? 'This project was not created from a known archetype.'
+                    : drifted
+                      ? `Adjusted from the ${archetype.name} starting point.`
+                      : `Cost mix, labor allocation, duration and curve are the ${archetype.name} averages.`}
+                </small>
+              </div>
               <Field label="DEPARTMENT / LOCATION">
                 <select
                   value={a.department}
