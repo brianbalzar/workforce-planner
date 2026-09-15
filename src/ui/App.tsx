@@ -99,6 +99,17 @@ import {
   toggleCategory,
   type CategorySelectionState,
 } from './categorySelection';
+import { DepartmentPicker } from './DepartmentPicker';
+import { DepartmentCompare } from './DepartmentCompare';
+import {
+  changeDeptMode,
+  departmentColor,
+  promoteDepartment,
+  selectedDepartments,
+  toggleDepartment,
+  type DepartmentMode,
+  type DepartmentSelectionState,
+} from './departmentSelection';
 
 export type Tab =
   | 'dashboard'
@@ -182,8 +193,40 @@ export function App() {
   const [catView, setCatView] = useState<'combined' | 'primary'>('combined');
   const categorySelection: CategorySelectionState = { category, extra };
   const [department, setDepartment] = useState(DEPARTMENTS[0]);
+  const [deptMode, setDeptMode] = useState<DepartmentMode>('single');
+  const [cmpDeptList, setCmpDeptList] = useState<string[]>([]);
   const [unit, setUnit] = useState<Unit>('People');
   const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
+  const departmentSelection: DepartmentSelectionState = {
+    department,
+    cmpDeptList,
+    deptMode,
+  };
+  // `cmpDeptList` only changes reference when actually updated (React keeps
+  // unrelated re-renders stable), so this is safe to memoize on the raw
+  // state values directly.
+  const allSelectedDepartments = useMemo(
+    () => selectedDepartments({ department, cmpDeptList, deptMode }),
+    [department, cmpDeptList, deptMode],
+  );
+  const toggleDept = (d: string) => {
+    const next = toggleDepartment(departmentSelection, d);
+    setDepartment(next.department);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
+  const promoteDept = (d: string) => {
+    const next = promoteDepartment(departmentSelection, d);
+    setDepartment(next.department);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
+  const setDeptModeChecked = (mode: DepartmentMode) => {
+    const next = changeDeptMode(departmentSelection, mode, DEPARTMENTS);
+    setDeptMode(next.deptMode);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
   const [drawer, setDrawer] = useState<Project | null>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [proposedProjectId, setProposedProjectId] = useState(
@@ -283,20 +326,45 @@ export function App() {
       assumptions.productiveHours,
       assumptions.hourlyRate,
     );
-  // §3 combined mode: only when 2+ categories are selected and the user
-  // hasn't switched to "primary only". Drives the demand chart, its
-  // tooltip and month-detail only — tiles/recommendations/timeline always
-  // follow the primary category's own `result` above.
+  // §3/§7 combined mode: categories combine when 2+ are selected and the
+  // user hasn't switched to "primary only"; departments combine in Combine
+  // mode with 2+ selected. Either can be active on its own, or both at
+  // once — when both are, the pooled result is built over the cross
+  // product of selected categories × selected departments, matching the
+  // design prototype's own sumSeries(pairs) reference logic. This drives
+  // the demand chart, its tooltip and month-detail only — metric tiles,
+  // recommendations and the workflow timeline always follow the primary
+  // category and lead department's own `result` above.
   const combinedCategories = extra.length > 0 && catView !== 'primary';
+  const combinedDepartments =
+    deptMode === 'combine' && allSelectedDepartments.length > 1;
+  const combined = combinedCategories || combinedDepartments;
   const chartResult = useMemo(() => {
-    if (!combinedCategories) return result;
+    if (!combined) return result;
+    const cats = combinedCategories
+      ? selectedCategories({ category, extra })
+      : [category];
+    const depts = combinedDepartments ? allSelectedDepartments : [department];
     const primaryAssumption = live.capacity[category];
-    const entries = selectedCategories({ category, extra }).map((c) => ({
-      result: analyze(live, c, department),
-      weight: categoryUnitWeight(unit, primaryAssumption, live.capacity[c]),
-    }));
+    const entries = cats.flatMap((c) =>
+      depts.map((d) => ({
+        result: analyze(live, c, d),
+        weight: categoryUnitWeight(unit, primaryAssumption, live.capacity[c]),
+      })),
+    );
     return combineWeightedResults(entries);
-  }, [combinedCategories, result, category, extra, live, department, unit]);
+  }, [
+    combined,
+    combinedCategories,
+    combinedDepartments,
+    category,
+    extra,
+    allSelectedDepartments,
+    department,
+    live,
+    unit,
+    result,
+  ]);
 
   useEffect(() => {
     if (!sourceChanged && runtimeData.mode !== 'uploaded') savePlans(plans);
@@ -641,8 +709,10 @@ export function App() {
       </nav>
       {['dashboard', 'projects', 'scenario'].includes(tab) && (
         <ControlBar
-          department={department}
-          setDepartment={setDepartment}
+          departmentSelection={departmentSelection}
+          toggleDept={toggleDept}
+          promoteDept={promoteDept}
+          setDeptMode={setDeptModeChecked}
           categorySelection={categorySelection}
           toggleCat={toggleCat}
           promoteCat={promoteCat}
@@ -671,37 +741,56 @@ export function App() {
         />
       )}
       <main className={tab === 'help' ? 'help-main' : ''}>
-        {tab === 'dashboard' && (
-          <Dashboard
-            result={result}
-            chartResult={chartResult}
-            combined={combinedCategories}
-            catView={catView}
-            setCatView={setCatView}
-            summary={summary}
-            display={display}
-            unit={unit}
-            selectedMonth={selectedMonth}
-            setSelectedMonth={setSelectedMonth}
-            plan={plan}
-            category={category}
-            department={department}
-            actions={live.actions.filter((a) => a.category === category)}
-            dirty={dirty}
-            savedScenario={savedResult.scenario}
-            categorySelection={categorySelection}
-            allCategoryResults={allCategoryResults}
-            promoteCat={promoteCat}
-            openScenarioAtActions={() => {
-              setTab('scenario');
-              setStep(5);
-            }}
-          />
-        )}
+        {tab === 'dashboard' &&
+          (deptMode === 'compare' && allSelectedDepartments.length > 1 ? (
+            <DepartmentCompare
+              departments={allSelectedDepartments}
+              category={category}
+              config={live}
+              plan={plan}
+              display={display}
+              focusDepartment={(d) => {
+                setDeptMode('single');
+                setDepartment(d);
+                setCmpDeptList([]);
+                setSelectedMonth(null);
+              }}
+            />
+          ) : (
+            <Dashboard
+              result={result}
+              chartResult={chartResult}
+              combined={combined}
+              combinedCategories={combinedCategories}
+              combinedDepartments={combinedDepartments}
+              departmentCount={allSelectedDepartments.length}
+              catView={catView}
+              setCatView={setCatView}
+              summary={summary}
+              display={display}
+              unit={unit}
+              selectedMonth={selectedMonth}
+              setSelectedMonth={setSelectedMonth}
+              plan={plan}
+              category={category}
+              department={department}
+              actions={live.actions.filter((a) => a.category === category)}
+              dirty={dirty}
+              savedScenario={savedResult.scenario}
+              categorySelection={categorySelection}
+              allCategoryResults={allCategoryResults}
+              promoteCat={promoteCat}
+              openScenarioAtActions={() => {
+                setTab('scenario');
+                setStep(5);
+              }}
+            />
+          ))}
         {tab === 'projects' && (
           <Projects
             config={live}
             department={department}
+            departments={allSelectedDepartments}
             category={category}
             result={result}
             mutate={mutate}
@@ -750,6 +839,7 @@ export function App() {
             config={live}
             category={category}
             setCategory={setCategory}
+            department={department}
             mutate={mutate}
           />
         )}
@@ -989,8 +1079,10 @@ function CapacityActionMenu({
 }
 
 function ControlBar(p: {
-  department: string;
-  setDepartment: (v: string) => void;
+  departmentSelection: DepartmentSelectionState;
+  toggleDept: (d: string) => void;
+  promoteDept: (d: string) => void;
+  setDeptMode: (mode: DepartmentMode) => void;
   categorySelection: CategorySelectionState;
   toggleCat: (c: LaborCategory) => void;
   promoteCat: (c: LaborCategory) => void;
@@ -1010,19 +1102,16 @@ function ControlBar(p: {
 }) {
   return (
     <section className="controls">
-      <Field
-        label="DEPARTMENT"
-        hint="Demand is filtered to the selected published department."
-      >
-        <select
-          value={p.department}
-          onChange={(e) => p.setDepartment(e.target.value)}
-        >
-          {DEPARTMENTS.map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-      </Field>
+      <DepartmentPicker
+        departments={DEPARTMENTS}
+        selection={p.departmentSelection}
+        toggle={p.toggleDept}
+        promote={p.promoteDept}
+        setMode={p.setDeptMode}
+        projectCount={(d) =>
+          PROJECTS.filter((project) => project.department === d).length
+        }
+      />
       <LaborCategoryPicker
         categories={LABOR_CATEGORIES}
         allResults={p.allCategoryResults}
@@ -1124,8 +1213,11 @@ function Dashboard({
   result,
   chartResult,
   combined,
+  combinedCategories,
+  combinedDepartments,
   catView,
   setCatView,
+  departmentCount,
   summary,
   display,
   unit,
@@ -1144,13 +1236,17 @@ function Dashboard({
 }: {
   result: ReturnType<typeof analyze>;
   /** Drives the demand chart, its tooltip and month-detail only. In combined
-   * mode this pools the selected categories; otherwise identical to
-   * `result`. Metric tiles, recommendations and the workflow timeline
-   * always use `result` (the primary category alone). */
+   * mode (category-combine, department-combine, or both) this pools the
+   * selected categories/departments; otherwise identical to `result`. Metric
+   * tiles, recommendations and the workflow timeline always use `result`
+   * (the primary category and lead department alone). */
   chartResult: ReturnType<typeof analyze>;
   combined: boolean;
+  combinedCategories: boolean;
+  combinedDepartments: boolean;
   catView: 'combined' | 'primary';
   setCatView: (v: 'combined' | 'primary') => void;
+  departmentCount: number;
   summary: ReturnType<typeof metrics>;
   display: (v: number) => string;
   unit: Unit;
@@ -1262,14 +1358,27 @@ function Dashboard({
           detail={`${plan.name} · ${plan.status} · ${summary.unconfirmedPeak.toFixed(1)} FTE unconfirmed at peak.`}
         />
       </section>
+      {combinedDepartments && (
+        <p className="info-note multi-department-note">
+          Demand and capacity are summed across {departmentCount} departments
+          below. Capacity above a department&apos;s own demand is not counted —
+          a surplus in one department cannot cover a shortage in another. The
+          tiles above, the workflow timeline and the recommendations still
+          reflect <strong>{department}</strong>, the lead department.
+        </p>
+      )}
       <section className="chart-card" data-tour="bottleneck-chart">
         <div className="card-heading">
           <div>
             <span>DEMAND VERSUS EXECUTABLE CAPACITY</span>
             <h2>
-              {combined
-                ? `${selected.length} categories combined — ${department} · ${plan.name}`
-                : `${category} — ${department} · ${plan.name}`}
+              {combinedCategories && combinedDepartments
+                ? `${selected.length} categories × ${departmentCount} departments combined · ${plan.name}`
+                : combinedCategories
+                  ? `${selected.length} categories combined — ${department} · ${plan.name}`
+                  : combinedDepartments
+                    ? `${category} — ${departmentCount} departments combined · ${plan.name}`
+                    : `${category} — ${department} · ${plan.name}`}
             </h2>
             {multiOn && (
               <div className="category-view-control">
@@ -1404,7 +1513,9 @@ function Dashboard({
                   <PlannerTooltip
                     result={chartResult}
                     display={display}
-                    combinedCount={combined ? selected.length : undefined}
+                    combinedCount={
+                      combinedCategories ? selected.length : undefined
+                    }
                   />
                 }
               />
@@ -1937,6 +2048,7 @@ function Timeline({
 function Projects({
   config,
   department,
+  departments,
   category,
   result,
   mutate,
@@ -1952,7 +2064,12 @@ function Projects({
   allCategoryResults,
 }: {
   config: ScenarioConfig;
+  /** The lead department — PortfolioOverlap stays scoped to this one alone. */
   department: string;
+  /** Every department in the current selection (Single: just the lead;
+   * Compare/Combine: the lead plus the comparison list). The projects table
+   * above PortfolioOverlap is scoped to all of these. */
+  departments: string[];
   category: LaborCategory;
   result: ReturnType<typeof analyze>;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
@@ -1967,12 +2084,14 @@ function Projects({
   categoryClickThrough: (category: LaborCategory, monthIndex?: number) => void;
   allCategoryResults: Map<LaborCategory, ReturnType<typeof analyze>>;
 }) {
-  const visibleProjects = PROJECTS.filter(
-    (project) => project.department === department,
+  const visibleProjects = PROJECTS.filter((project) =>
+    departments.includes(project.department),
   );
-  const visibleProposed = config.proposedProjects.filter(
-    (project) => project.department === department,
+  const visibleProposed = config.proposedProjects.filter((project) =>
+    departments.includes(project.department),
   );
+  const hiddenCount = PROJECTS.length - visibleProjects.length;
+  const showDepartmentDot = departments.length > 1;
   return (
     <section className="screen-card">
       <div className="section-title">
@@ -1984,6 +2103,16 @@ function Projects({
             proposed scenario{' '}
             {visibleProposed.length === 1 ? 'project' : 'projects'}
           </p>
+          {hiddenCount > 0 && (
+            <p>
+              {hiddenCount}{' '}
+              {hiddenCount === 1
+                ? 'project in another department is'
+                : 'projects in other departments are'}{' '}
+              not shown. Capacity belongs to its department, so they cannot
+              affect this plan.
+            </p>
+          )}
         </div>
         <button
           onClick={() =>
@@ -2046,6 +2175,17 @@ function Projects({
                       {p.name}
                     </button>
                     <small>
+                      {showDepartmentDot && (
+                        <span
+                          className="dept-picker-dot"
+                          style={{
+                            background: departmentColor(
+                              departments.indexOf(p.department),
+                            ),
+                          }}
+                          aria-hidden="true"
+                        />
+                      )}
                       {p.department} · {p.primaryLabor}
                     </small>
                   </td>
@@ -2197,7 +2337,20 @@ function Projects({
                   >
                     {proposed.name}
                   </button>
-                  <small>{proposed.department}</small>
+                  <small>
+                    {showDepartmentDot && (
+                      <span
+                        className="dept-picker-dot"
+                        style={{
+                          background: departmentColor(
+                            departments.indexOf(proposed.department),
+                          ),
+                        }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    {proposed.department}
+                  </small>
                 </td>
                 <td>Proposed</td>
                 <td>${proposed.value.toFixed(1)}M</td>
@@ -3060,16 +3213,18 @@ function Capacity({
   config,
   category,
   setCategory,
+  department,
   mutate,
 }: {
   config: ScenarioConfig;
   category: LaborCategory;
   setCategory: (c: LaborCategory) => void;
+  department: string;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
 }) {
   const selected = config.capacity[category];
   const fields: [keyof typeof selected, string][] = [
-    ['headcount', 'Headcount'],
+    ['headcount', 'Company headcount'],
     ['prefabCapacity', 'Prefab shop cap.'],
     ['productiveHours', 'Prod hrs/person/mo'],
     ['hourlyRate', 'Std cost/hour'],
@@ -3095,11 +3250,18 @@ function Capacity({
             <p>Inputs update every analysis view immediately.</p>
           </div>
         </div>
+        <p className="info-note">
+          Headcount is maintained company-wide. A per-department roster split
+          from the data pipeline isn&apos;t published yet — until then, the
+          dashboard uses each category&apos;s full company headcount for every
+          department, including {department}.
+        </p>
         <div className="table-scroll">
           <table className="capacity-table">
             <thead>
               <tr>
                 <th>LABOR CATEGORY</th>
+                <th>THIS DEPT ROSTER</th>
                 {fields.map(([, label]) => (
                   <th key={label}>{label}</th>
                 ))}
@@ -3118,6 +3280,14 @@ function Capacity({
                       >
                         {cat}
                       </button>
+                    </td>
+                    <td>
+                      <span
+                        className="dept-picker-dot"
+                        style={{ background: '#EFEEEC' }}
+                        aria-hidden="true"
+                      />
+                      <small>Not yet available</small>
                     </td>
                     {fields.map(([key, fieldLabel]) => (
                       <td key={key}>
@@ -3172,9 +3342,9 @@ function Capacity({
           <h2>{category}</h2>
         </header>
         <Metric
-          label="RAW HEADCOUNT"
+          label="COMPANY HEADCOUNT"
           value={`${selected.headcount}`}
-          detail="Department-owned workforce"
+          detail="Not yet split by department"
         />
         <Metric
           label="PRE-FAB SHOP CAPACITY"

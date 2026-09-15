@@ -424,7 +424,9 @@ export function categoryUnitWeight(
  * total-vs-scenario ratio first, so capacity beyond what that entry's own
  * demand needed is never counted — a surplus in one category/department
  * never covers a shortage in another. `gap` is summed directly (scaled,
- * never recomputed from the summed totals).
+ * never recomputed from the summed totals). Pass `weight: 1` for every
+ * entry when combining same-unit entries (e.g. departments under the same
+ * category) — this is a strict generalization of a plain unweighted sum.
  */
 export function combineWeightedResults(
   entries: Array<{ result: AnalysisResult; weight: number }>,
