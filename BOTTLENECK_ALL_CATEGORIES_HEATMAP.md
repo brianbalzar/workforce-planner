@@ -1,11 +1,20 @@
-# Spec: All-Categories Bottleneck Heatmap
+# Spec: All-Categories Bottleneck Heatmap + Labor Category Picker
 
 **Status:** Proposed — handoff spec for Codex to implement. Claude owns the
 data pipeline (`workforce-planner-data`); Codex owns this app repo (UI,
 `engine.ts`, deploy) per our 2026-09-14 team split. This document does not
 change any code in this repo — it's the spec for that change.
 
-**Requested by:** Brian, 2026-09-15, in his own words:
+**Revision 2 (2026-09-15, same day, follow-up conversation):** the original
+heatmap-only design below is still the base — Brian confirmed "heatmap-first"
+after seeing both options. This revision adds the piece his boss asked for:
+a real multi-select widget (checkboxes, sparklines, red/yellow/green status)
+replacing the plain LABOR CATEGORY dropdown, plus what checking multiple
+categories actually does to the rest of the screen. Section 5 is new;
+sections 1-4 are the original spec, lightly updated where the widget changes
+the drill-down interaction.
+
+**Requested by:** Brian, 2026-09-15, in his own words (first pass):
 
 > While using the app, one thing that's difficult is finding where a
 > bottleneck is. For example, you have to select each individual labor
@@ -13,238 +22,239 @@ change any code in this repo — it's the spec for that change.
 > labor, that maybe gives a plot that would show all the labor and where
 > the bottleneck might be? Then we can drill into that labor category?
 
-**Approved approach** (Brian picked this over alternatives when asked):
-an **all-categories heatmap** — one row per labor category, one column per
-month, colored by bottleneck severity — that you can scan at a glance, then
-click a row to drill into that category's existing single-category
-Dashboard view.
+And the follow-up, from a conversation with his boss:
 
-## Problem today
+> Putting check boxes next to the selections on the labor category... maybe
+> there's a way we can visualize with sparkline or something in the dropdown
+> so we know which one is limiting? Or maybe we can color code them red,
+> yellow, green if they're in danger?
+>
+> I think we should build a widget. It would provide a lot of value and give
+> us credence.
+
+## 1. Problem today
 
 `category` is a single piece of global state (`App.tsx` line 165,
-`useState<LaborCategory>`), driven by one `<select>` in `ControlBar`
+`useState<LaborCategory>`), driven by one plain `<select>` in `ControlBar`
 ("LABOR CATEGORY" field, line 921). Every bottleneck-relevant view —
-`Dashboard` (the main chart, line 1018), `PortfolioOverlap`'s heat row
-(line 2143-2165), and `Capacity` — reads that one global category. To
-check whether, say, Electricians are the constraint in November, Brian has
-to already suspect Electricians, select them from the dropdown, and look.
-There's no view that shows all 16 categories at once so a bottleneck can be
-spotted before you know which category to look for.
+`Dashboard` (line 1018), `PortfolioOverlap`'s heat row (lines 2143-2165),
+and `Capacity` — reads that one global category. To check whether, say,
+Electricians are the constraint in November, Brian has to already suspect
+Electricians, select them from the dropdown, and look. There's no way to
+scan all 16 categories at once, and the dropdown itself carries zero signal
+about which options are worth picking.
 
-## Where this lives
+## 2. Where this lives
 
-`PortfolioOverlap` (`App.tsx`, function starting line 2008) is rendered
+`PortfolioOverlap` (function starting `App.tsx` line 2008) is rendered
 inside `Projects` (line 1995), which renders when `tab === 'projects'`
 (line 604) — **not** inside the `tab === 'dashboard'` block (that block
-closes at line 603, well before `PortfolioOverlap` is even invoked). So
-today's single-category heat row already lives on the Projects tab, next
-to the per-project overlap bars, not on the Dashboard tab. The new
-all-categories heatmap should be added as a sibling section in that same
-place, not on the Dashboard tab — keep the Dashboard tab as the focused
-single-category drill-down view it already is.
+closes at line 603, well before `PortfolioOverlap` is even invoked). The
+new heatmap and the new picker widget both belong to this same
+category-selection problem, but live in two different places: the widget
+replaces the dropdown in `ControlBar` (visible everywhere, all tabs), and
+the heatmap is a new scan section on the Projects tab, next to the existing
+single-category heat row.
 
-## Proposed change
+## 3. A shared per-category results memo
 
-### 1. New component: `BottleneckHeatmap`
-
-Add a new component, rendered directly above (or below — Codex's call)
-the existing `category.toUpperCase() + ' — MONTHLY LABOR NEEDED'` single-row
-heat block inside `PortfolioOverlap` (lines 2143-2165), or as its own
-sibling section in `Projects` right before `<PortfolioOverlap ... />`
-(line 1995). Either placement keeps it on the Projects tab, next to the
-existing overlap heat row it generalizes.
+Both the widget (sparklines, status dots) and the heatmap (all 16 rows)
+need every category's `analyze()` result, not just the one currently
+selected. Compute this once, at the `App` level, and pass it down to both,
+rather than each computing its own copy:
 
 ```tsx
-function BottleneckHeatmap({
-  config,
-  department,
-  setCategory,
-  setTab,
-  setSelectedMonth,
-}: {
-  config: ScenarioConfig;
-  department: string;
-  setCategory: (v: LaborCategory) => void;
-  setTab: (t: Tab) => void;
-  setSelectedMonth: (v: number | null) => void;
-}) {
-  // One analyze() call per labor category instead of one for the globally
-  // selected category. LABOR_CATEGORIES has 16 entries; analyze() is
-  // already cheap enough to call in a loop elsewhere in this file (see the
-  // plan-comparison modal, ~line 5075), but 16x here runs on every
-  // Projects-tab render, so memoize it — see Performance note below.
-  const rows = useMemo(
-    () =>
-      LABOR_CATEGORIES.map((cat) => ({
-        category: cat,
-        result: analyze(config, cat, department),
-      })),
-    [config, department],
-  );
+// In App(), alongside the existing single-category `result`:
+const allCategoryResults = useMemo(
+  () =>
+    new Map(
+      LABOR_CATEGORIES.map((cat) => [cat, analyze(live, cat, department)]),
+    ),
+  [live, department],
+);
+```
 
-  const EPSILON = 0.05;
-  const statusFor = (result: ReturnType<typeof analyze>, i: number) => {
-    const need = result.scenario[i];
-    if (need <= EPSILON) return 'none' as const;
-    if (need <= result.existing[i] + result.prefab[i] + EPSILON)
-      return 'good' as const;
-    if (need <= result.total[i] + EPSILON) return 'watch' as const;
-    return 'critical' as const;
-  };
+This is 16 `analyze()` calls instead of 1, on every relevant render.
+`analyze()` is already called in a loop elsewhere (the plan-comparison
+modal, `CompareModal` ~line 5068), so the pattern isn't new, but doing it
+this often is a bigger, more frequent cost than that modal's occasional
+use — profile it against the real ~50-project, 18-month dataset before
+shipping, and consider computing it lazily (only once the widget is opened
+or the Projects tab is visible) if it's too slow to run on every keystroke
+of a scenario edit.
 
-  // Sort worst-first so the categories most worth looking at are on top:
-  // by count of 'critical' months, then 'watch' months, as a tiebreak.
-  const withSeverity = rows
-    .map((r) => {
-      const statuses = MONTHS.map((_, i) => statusFor(r.result, i));
-      return {
-        ...r,
-        statuses,
-        criticalCount: statuses.filter((s) => s === 'critical').length,
-        watchCount: statuses.filter((s) => s === 'watch').length,
-      };
-    })
-    .sort(
-      (a, b) =>
-        b.criticalCount - a.criticalCount || b.watchCount - a.watchCount,
-    );
+The same status classification `PortfolioOverlap` already uses should be
+reused everywhere (heatmap cells, widget dots, widget sparklines) rather
+than reinvented per component:
 
-  return (
-    <section className="chart-card overlap-card" data-tour="all-category-heatmap">
-      <div className="card-heading">
-        <div>
-          <span>ALL LABOR — BOTTLENECK SCAN</span>
-          <h2>Every category, one screen</h2>
-        </div>
-      </div>
-      <div className="overlap-scroll">
-        <div className="overlap-row overlap-months">
-          <div />
-          {MONTHS.map((m, i) => (
-            <div key={m} className="overlap-month">
-              {m.slice(0, 3)}
-            </div>
-          ))}
-        </div>
-        {withSeverity.map(({ category: cat, statuses, result }) => (
-          <div className="overlap-row overlap-heat-row" key={cat}>
-            <div className="overlap-row-label">
-              <button
-                className="text-link"
-                onClick={() => {
-                  setCategory(cat);
-                  setTab('dashboard');
-                }}
-              >
-                {cat}
-              </button>
-            </div>
-            {statuses.map((status, i) => (
-              <div
-                key={MONTHS[i]}
-                className={`overlap-heat-cell status-${status}`}
-                style={{ gridColumnStart: i + 2, gridColumnEnd: i + 3 }}
-                title={`${cat} · ${MONTHS[i]}: ${result.scenario[i].toFixed(1)} needed`}
-                role="button"
-                tabIndex={0}
-                onClick={() => {
-                  setCategory(cat);
-                  setSelectedMonth(i);
-                  setTab('dashboard');
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    setCategory(cat);
-                    setSelectedMonth(i);
-                    setTab('dashboard');
-                  }
-                }}
-              >
-                {result.scenario[i] > 0.05 ? result.scenario[i].toFixed(1) : ''}
-              </div>
-            ))}
-          </div>
-        ))}
-      </div>
-      <p className="info-note heat-legend">
-        Same coloring as the category heat row below: total demand each
-        month, colored by how it&apos;s covered.
-        <span className="heat-legend-swatch status-good" />
-        Existing staff and/or the pre-fab shop
-        <span className="heat-legend-swatch status-watch" />
-        Needs planned hires, subcontract, or overtime
-        <span className="heat-legend-swatch status-critical" />
-        Unresolved gap
-      </p>
-      <p className="info-note">
-        Rows are sorted worst-first. Click a category name or a cell to
-        switch LABOR CATEGORY and open it on the Bottleneck Dashboard —
-        clicking a cell also jumps to that month.
-      </p>
-    </section>
+```tsx
+const EPSILON = 0.05;
+function monthStatus(result: ReturnType<typeof analyze>, i: number) {
+  const need = result.scenario[i];
+  if (need <= EPSILON) return 'none' as const;
+  if (need <= result.existing[i] + result.prefab[i] + EPSILON)
+    return 'good' as const;
+  if (need <= result.total[i] + EPSILON) return 'watch' as const;
+  return 'critical' as const;
+}
+// worst status across the window, for a single-dot summary (widget row, sort order):
+function worstStatus(result: ReturnType<typeof analyze>) {
+  const order = { none: 0, good: 1, watch: 2, critical: 3 } as const;
+  return MONTHS.reduce(
+    (worst, _, i) =>
+      order[monthStatus(result, i)] > order[worst]
+        ? monthStatus(result, i)
+        : worst,
+    'none' as const,
   );
 }
 ```
 
-### 2. Wiring
+## 4. The heatmap (`BottleneckHeatmap`)
 
-- `Projects` already receives `setTab` and `setSelectedMonth` (lines
-  1724-1725) — it just needs to also receive `setCategory` (not currently
-  passed to `Projects`, only used at the `App` level and inside
-  `ControlBar`) and pass all three down to the new component.
-- Reuses the existing `Tab`, `LaborCategory`, `ScenarioConfig`, `analyze`,
-  `MONTHS`, `LABOR_CATEGORIES` types/values already imported in `App.tsx`
-  — no new dependencies.
-- Reuses the existing `overlap-row`, `overlap-heat-row`, `overlap-heat-cell`,
-  `overlap-month`, `status-{none,good,watch,critical}` CSS classes verbatim
-  — no new CSS should be needed beyond maybe a hover/focus state for the
-  now-clickable cells (`overlap-heat-cell` isn't currently a button/clickable
-  element in the single-category row, so check that a focus outline looks
-  right before shipping).
+Rendered as a sibling section in `Projects`, right before
+`<PortfolioOverlap ... />` (line 1995) — or inside `PortfolioOverlap`,
+above its existing single-category heat row. Either placement keeps it on
+the Projects tab.
 
-### 3. Drill-down behavior
+- One row per `LaborCategory`, sourced from `allCategoryResults` (section 3) instead of computing its own — no duplicate `analyze()` calls.
+- Same `overlap-row`, `overlap-heat-row`, `overlap-heat-cell`,
+  `overlap-month`, `status-{none,good,watch,critical}` CSS classes as
+  `PortfolioOverlap` already uses — no new CSS needed beyond a focus state
+  for clickable cells.
+- Sorted worst-first (`worstStatus`, then count of `'critical'` months as a
+  tiebreak) so the categories most worth looking at are on top.
+- **Row selection is now a checkbox, not a plain click** (this is the
+  change from Revision 1): each row has a checkbox bound to the _same_
+  `selectedCategories: Set<LaborCategory>` state the widget (section 5)
+  uses. Checking a row here is equivalent to checking it in the widget —
+  one shared selection, two places to change it. A cell click still jumps
+  straight to the Dashboard for that category+month
+  (`setSelectedCategories(new Set([cat])); setSelectedMonth(i); setTab('dashboard')`),
+  same as the original month-header click pattern already in
+  `PortfolioOverlap` (lines 2098-2101).
 
-Two click targets, both switch the global `category` state (the same one
-`ControlBar`'s dropdown drives) and jump to the Dashboard tab, which then
-shows that category's existing single-category chart exactly as it does
-today:
+## 5. The `LaborCategoryPicker` widget (new — Revision 2)
 
-- **Row label click** (category name): sets `category`, switches to the
-  Dashboard tab. Mirrors the existing `Capacity` table's
-  `onClick={() => setCategory(cat)}` row pattern (line ~2864 area).
-- **Cell click** (a specific category+month): sets `category`, sets
-  `selectedMonth`, switches to the Dashboard tab. Mirrors the existing
-  month-header click already in `PortfolioOverlap` (lines 2098-2101,
-  `setSelectedMonth(i); setTab('dashboard');`).
+### Why this can't be the existing `<select>`
 
-No new state is needed — this reuses `category`/`setCategory`,
-`selectedMonth`/`setSelectedMonth`, and `tab`/`setTab`, all of which
-already exist at the `App` level (lines 164-170) and already flow down to
-`Dashboard` and `Projects`.
+A native HTML `<select>` cannot render a checkbox, a sparkline, or a colored
+dot per option — browsers don't allow rich content inside `<option>`. So
+"add checkboxes to the dropdown" is a new custom component, not a prop
+change: a button that looks like today's field, opening a popover/listbox
+with 16 rows, each row richer than plain text. Worth being upfront about
+this with Brian's boss — it's the right call for the value it adds, but
+it's a real small component, not a one-line tweak.
 
-### Performance note
+### What each row shows
 
-`analyze()` today runs once per render off the single global `category`
-(`App.tsx` line 201-204, already `useMemo`'d on `[live, category,
-department]`). This component calls it 16x (once per `LaborCategory`)
-instead of once. `analyze()` is already called in a loop elsewhere (the
-plan-comparison modal), so the pattern isn't new, but doing it on every
-render of the Projects tab is a bigger, more frequent cost than that
-modal's occasional use. Recommend memoizing on `[config, department]`
-exactly as sketched above, and consider only mounting
-`BottleneckHeatmap` when the Projects tab is actually visible/scrolled
-into view rather than always-rendered, if a perf pass shows it's needed —
-Codex's call once it's profiled against the real 16-category, 18-month,
-~50-project dataset.
+```tsx
+function CategoryPickerRow({
+  category,
+  result,
+  checked,
+  onToggle,
+}: {
+  category: LaborCategory;
+  result: ReturnType<typeof analyze>;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  const status = worstStatus(result);
+  // Sparkline: the 18-month gap curve (result.gap), not raw demand —
+  // gap is literally "how much of this category's need is unresolved,"
+  // the thing Brian is hunting for. A flat-zero sparkline is a fine,
+  // legible signal for "not a bottleneck."
+  const points = result.gap;
+  return (
+    <label className="category-picker-row">
+      <input type="checkbox" checked={checked} onChange={onToggle} />
+      <span className={`status-dot status-${status}`} aria-hidden="true" />
+      <span className="category-picker-name">{category}</span>
+      <Sparkline values={points} className={`status-${status}`} />
+    </label>
+  );
+}
+```
 
-### Out of scope / left to Codex's judgment
+`Sparkline` is a small new presentational component — an inline `<svg>`
+polyline over the 18 values, no axes/labels, sized to fit inline (roughly
+60×20px). No charting library needed for something this small; Recharts
+(already a dependency) also has a minimal `<LineChart>` mode if Codex
+prefers reusing one library everywhere for consistency — either is fine.
 
-- Exact placement relative to the existing single-category heat row inside
-  `PortfolioOverlap` (above, below, or replacing it — Brian didn't ask to
-  remove the single-category view, just to add an all-categories one).
-- Whether "worst-first" sort is the right default, or whether it should be
-  toggleable/alphabetical — flagged as a reasonable default, not a hard
-  requirement.
-- Mobile/narrow-viewport handling of a 16-row x 18-column grid (the
-  existing `overlap-scroll` container already handles horizontal scroll
-  for the single-row case; confirm it's still usable with 16 rows).
+### Behavior
+
+- Rows sorted worst-first, same as the heatmap (reuse `worstStatus`).
+- Checking a row adds it to `selectedCategories`; the widget's closed-state
+  label reads e.g. "Pipefitter, Electrician +1" when multiple are checked,
+  or the single name when exactly one is (matching today's dropdown
+  wording when there's no ambiguity).
+- **Exactly one checked** (the common case, and the default on load — seed
+  `selectedCategories` with the same single default `category` state uses
+  today, e.g. Plumber): behaves exactly like today. `Dashboard` shows its
+  existing single-category composition chart
+  (`MonthlyCompositionChart`, line 1380) and metric tiles.
+- **Two or more checked**: per Brian's answer, this drives an **overlay
+  chart** — see section 5a. `Dashboard`'s current composition chart doesn't
+  make sense for more than one category (you can't stack two categories'
+  existing/prefab/hire/subcontract breakdown in one readable chart), so it
+  swaps to the overlay view instead. The per-category metric tiles at the
+  top of `Dashboard` (line 1085 area) also need a decision here — see Open
+  question below.
+- **Zero checked**: not a valid state — keep at least one checked (disable
+  unchecking the last box, or fall back to the previous single selection).
+
+### 5a. Overlay chart (new component, `CategoryOverlayGapChart` or similar)
+
+When 2+ categories are selected, replace `Dashboard`'s composition chart
+with a simple multi-series line chart: one line per selected category,
+plotting `result.gap[i]` (unresolved shortfall) across the 18 months, using
+`allCategoryResults` so nothing is recomputed. This directly answers "which
+of these is the worse bottleneck, and when" — the actual ask from Brian's
+first message. Each category needs a stable color (reuse whatever
+categorical palette the app already has, if any; otherwise a small fixed
+16-color list keyed by `LaborCategory`, reused for the status dots too so a
+category's color is consistent across the widget, the legend, and the
+chart).
+
+### Open question for Codex / Brian to settle before building
+
+`Dashboard`'s metric tiles (`FIRST CONSTRAINED MONTH`, `PEAK UNRESOLVED
+GAP`, etc., `App.tsx` ~line 1085) are currently single-category numbers.
+With multiple categories selected, these could become: (a) one tile set
+per category, stacked or in a small-multiples row; (b) a single tile set
+computed across the _union_ of selected categories (e.g. "peak gap" = the
+worst single-category peak among those selected, or a summed peak); or (c)
+hidden entirely in overlay mode, letting the chart and heatmap carry the
+detail. Not resolved here — flagging so Codex doesn't have to guess and
+Brian doesn't get surprised by whichever default ships.
+
+## 6. Wiring summary
+
+- `App`'s `category: LaborCategory` state becomes
+  `selectedCategories: Set<LaborCategory>`, with a derived
+  `category = selectedCategories.size === 1 ? [...selectedCategories][0] : <first selected, for `assumptions`/`display` which still need one>`
+  — check every current single-category read site (`assumptions =
+live.capacity[category]` at line 211, `Capacity` component, etc.) for
+  whether it needs a "pick one" fallback or a small multiples treatment
+  too. This is the widest-reaching part of the change — worth an explicit
+  pass over every `category` read in `App.tsx`, not just `Dashboard`.
+- `ControlBar`'s LABOR CATEGORY `<Field>` (line 921) is replaced by
+  `<LaborCategoryPicker>`, fed `allCategoryResults` and
+  `selectedCategories`/`setSelectedCategories`.
+- `Projects`/`PortfolioOverlap`/`BottleneckHeatmap` all read the same
+  `selectedCategories` state, so checking a box in the widget and checking
+  a box in the heatmap are the same action.
+
+## 7. Out of scope / left to Codex's judgment
+
+- Exact popover mechanics (a `<details>`/`<summary>`, a small headless
+  listbox, or a custom positioned panel) — whatever matches the rest of
+  this app's existing component style.
+- The metric-tiles question in section 5a.
+- Whether `BottleneckHeatmap` sits above or below `PortfolioOverlap`'s
+  existing single-category row, or replaces it now that the picker
+  provides an at-a-glance signal on its own.
+- Mobile/narrow-viewport handling of a 16-row popover and a 16-row heatmap
+  grid.
