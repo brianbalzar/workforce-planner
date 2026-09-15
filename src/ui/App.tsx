@@ -86,6 +86,8 @@ import {
 } from '../planning/engine';
 import { loadPlanState, resetPlans, savePlans } from '../persistence/planStore';
 import { GuidedTour, TOUR_SEEN_KEY } from './GuidedTour';
+import { BuildOpsRefreshModal } from './BuildOpsRefreshModal';
+import { CountTileStrip, TrustContractCards } from './ImportFlowShell';
 
 export type Tab =
   | 'dashboard'
@@ -101,7 +103,8 @@ type Modal =
   | 'proposed-intake'
   | 'proposed'
   | 'action'
-  | 'compare';
+  | 'compare'
+  | 'buildops-refresh';
 const TODAY = new Date();
 const TODAY_MONTH_KEY = `${TODAY.getFullYear()}-${String(TODAY.getMonth() + 1).padStart(2, '0')}`;
 const tabList: [Tab, string][] = [
@@ -122,7 +125,7 @@ const same = (a: unknown, b: unknown) =>
  * Escape. Combined with role="dialog"/aria-modal on the panel element this
  * covers REVIEW_RECOMMENDATIONS item 12.
  */
-function useDialogA11y<T extends HTMLElement>(onEscape: () => void) {
+export function useDialogA11y<T extends HTMLElement>(onEscape: () => void) {
   const ref = useRef<T>(null);
   const onEscapeRef = useRef(onEscape);
   // Keep the ref pointed at the latest callback from an effect (not render)
@@ -181,6 +184,7 @@ export function App() {
   const [editingSoftBacklogId, setEditingSoftBacklogId] = useState<
     string | null
   >(null);
+  const [refreshProject, setRefreshProject] = useState<Project | null>(null);
   const [actionDraft, setActionDraft] = useState<CapacityAction | null>(null);
   const [modalSnapshot, setModalSnapshot] = useState<ScenarioConfig | null>(
     null,
@@ -385,6 +389,21 @@ export function App() {
         ? `“${project.name}” updated in Soft Backlog.`
         : `“${project.name}” added to Soft Backlog.`,
     );
+  };
+  const openBuildOpsRefresh = (target: Project) => {
+    setDrawer(null);
+    setRefreshProject(target);
+    setModal('buildops-refresh');
+  };
+  const commitBuildOpsRefresh = (refreshed: Project) => {
+    const isNew = !PROJECTS.some((p) => p.id === refreshed.id);
+    if (isNew) addRuntimeProject(refreshed);
+    else updateRuntimeProject(refreshed.id, refreshed);
+    mutate((config) => {
+      config.included[refreshed.id] = true;
+      config.probabilities[refreshed.id] = refreshed.planningProbability;
+    });
+    setToast(`“${refreshed.name}” refreshed from BuildOps.`);
   };
   const exportDataset = () => {
     const data = getActivePlannerData();
@@ -675,6 +694,7 @@ export function App() {
           mutate={mutate}
           display={display}
           close={() => setDrawer(null)}
+          refreshFromBuildOps={openBuildOpsRefresh}
         />
       )}
       {modal === 'add-project' && (
@@ -754,6 +774,16 @@ export function App() {
           category={category}
           department={department}
           close={() => setModal(null)}
+        />
+      )}
+      {modal === 'buildops-refresh' && refreshProject && (
+        <BuildOpsRefreshModal
+          project={refreshProject}
+          close={() => {
+            setModal(null);
+            setRefreshProject(null);
+          }}
+          commit={commitBuildOpsRefresh}
         />
       )}
       {toast && <output className="toast">{toast}</output>}
@@ -2320,12 +2350,14 @@ function ProjectDrawer({
   mutate,
   display,
   close,
+  refreshFromBuildOps,
 }: {
   project: Project;
   config: ScenarioConfig;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
   display: (v: number) => string;
   close: () => void;
+  refreshFromBuildOps: (project: Project) => void;
 }) {
   const prob =
     project.type === 'Hard'
@@ -2354,6 +2386,11 @@ function ProjectDrawer({
           <p>
             ${project.value.toFixed(1)}M · {project.department}
           </p>
+          {project.type === 'Hard' && (
+            <button onClick={() => refreshFromBuildOps(project)}>
+              <Upload size={14} /> Refresh from BuildOps
+            </button>
+          )}
           <button onClick={close}>
             <X /> Close
           </button>
@@ -3484,6 +3521,17 @@ function AddProjectModal({
             </span>
           </button>
         </div>
+        <TrustContractCards
+          canChange={[
+            'Contract value, cost mix and internal labor budget',
+            "Labor allocation by category, from the estimate's crew build-up",
+            'A monthly staffing forecast derived from the estimate schedule',
+          ]}
+          neverTouches={[
+            'Every existing project, plan and capacity action',
+            'It enters as soft backlog at a planning probability you set, and stays editable',
+          ]}
+        />
         {error && (
           <div className="data-import-error add-project-error" role="alert">
             <strong>The estimate could not be imported.</strong>
@@ -3604,15 +3652,44 @@ function SoftBacklogModal({
         </header>
         <div className="soft-backlog-body">
           {draft.sourceFileName && !editingProjectId && (
-            <section className="estimate-import-summary">
-              <div>
-                <strong>{draft.sourceFileName}</strong>
-                <span>
-                  Extracted: {draft.extractedFields.join(', ') || 'No fields'}
-                </span>
-              </div>
-              <b>{draft.extractedFields.length} fields recognized</b>
-            </section>
+            <>
+              <CountTileStrip
+                tiles={[
+                  {
+                    label: 'FIELDS EXTRACTED',
+                    value: draft.extractedFields.length,
+                  },
+                  {
+                    label: 'LABOR CATEGORIES',
+                    value: Object.values(project.laborAllocation).filter(
+                      (v) => (v ?? 0) > 0,
+                    ).length,
+                  },
+                  {
+                    label: 'FORECAST MONTHS',
+                    value: project.curve.filter((v) => v > 0).length,
+                  },
+                  {
+                    label: 'ASSUMPTIONS FLAGGED',
+                    value: draft.warnings.length,
+                    tone: draft.warnings.length ? 'warning' : 'success',
+                  },
+                  {
+                    label: 'BLOCKING ERRORS',
+                    value: issues.length,
+                    tone: issues.length ? 'danger' : 'success',
+                  },
+                ]}
+              />
+              <section className="estimate-import-summary">
+                <div>
+                  <strong>{draft.sourceFileName}</strong>
+                  <span>
+                    Extracted: {draft.extractedFields.join(', ') || 'No fields'}
+                  </span>
+                </div>
+              </section>
+            </>
           )}
           {draft.warnings.length > 0 && (
             <section className="estimate-warnings">
