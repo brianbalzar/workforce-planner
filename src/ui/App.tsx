@@ -73,6 +73,7 @@ import {
   activeRange,
   analyze,
   assumptionFlagsForProject,
+  combineResults,
   datePosition,
   forecastFreshness,
   formatDate,
@@ -86,6 +87,17 @@ import {
 } from '../planning/engine';
 import { loadPlanState, resetPlans, savePlans } from '../persistence/planStore';
 import { GuidedTour, TOUR_SEEN_KEY } from './GuidedTour';
+import { DepartmentPicker } from './DepartmentPicker';
+import { DepartmentCompare } from './DepartmentCompare';
+import {
+  changeDeptMode,
+  departmentColor,
+  promoteDepartment,
+  selectedDepartments,
+  toggleDepartment,
+  type DepartmentMode,
+  type DepartmentSelectionState,
+} from './departmentSelection';
 
 export type Tab =
   | 'dashboard'
@@ -166,8 +178,40 @@ export function App() {
     LABOR_CATEGORIES.includes('Plumber') ? 'Plumber' : LABOR_CATEGORIES[0],
   );
   const [department, setDepartment] = useState(DEPARTMENTS[0]);
+  const [deptMode, setDeptMode] = useState<DepartmentMode>('single');
+  const [cmpDeptList, setCmpDeptList] = useState<string[]>([]);
   const [unit, setUnit] = useState<Unit>('People');
   const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
+  const departmentSelection: DepartmentSelectionState = {
+    department,
+    cmpDeptList,
+    deptMode,
+  };
+  // `cmpDeptList` only changes reference when actually updated (React keeps
+  // unrelated re-renders stable), so this is safe to memoize on the raw
+  // state values directly.
+  const allSelectedDepartments = useMemo(
+    () => selectedDepartments({ department, cmpDeptList, deptMode }),
+    [department, cmpDeptList, deptMode],
+  );
+  const toggleDept = (d: string) => {
+    const next = toggleDepartment(departmentSelection, d);
+    setDepartment(next.department);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
+  const promoteDept = (d: string) => {
+    const next = promoteDepartment(departmentSelection, d);
+    setDepartment(next.department);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
+  const setDeptModeChecked = (mode: DepartmentMode) => {
+    const next = changeDeptMode(departmentSelection, mode, DEPARTMENTS);
+    setDeptMode(next.deptMode);
+    setCmpDeptList(next.cmpDeptList);
+    setSelectedMonth(null);
+  };
   const [drawer, setDrawer] = useState<Project | null>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [proposedProjectId, setProposedProjectId] = useState(
@@ -207,6 +251,25 @@ export function App() {
     () => analyze(saved, category, department),
     [saved, category, department],
   );
+  // Per-department analyze() results for the lead category, computed only
+  // once Compare/Combine is active (cost control — Single mode never pays
+  // for departments the user hasn't asked to see).
+  const allDepartmentResults = useMemo(() => {
+    if (deptMode === 'single') return new Map([[department, result]]);
+    return new Map(
+      allSelectedDepartments.map((d) => [d, analyze(live, category, d)]),
+    );
+  }, [deptMode, allSelectedDepartments, live, category, department, result]);
+  // Combine mode pools the selected departments' demand and capacity for the
+  // demand chart only — metric tiles, recommendations and the workflow
+  // timeline always follow the lead department's own `result` above.
+  const chartResult = useMemo(() => {
+    if (deptMode !== 'combine' || allSelectedDepartments.length < 2)
+      return result;
+    return combineResults(
+      allSelectedDepartments.map((d) => allDepartmentResults.get(d)!),
+    );
+  }, [deptMode, allSelectedDepartments, allDepartmentResults, result]);
   const dirty = !same(live, saved);
   const assumptions = live.capacity[category];
   const display = (value: number) =>
@@ -560,8 +623,10 @@ export function App() {
       </nav>
       {['dashboard', 'projects', 'scenario'].includes(tab) && (
         <ControlBar
-          department={department}
-          setDepartment={setDepartment}
+          departmentSelection={departmentSelection}
+          toggleDept={toggleDept}
+          promoteDept={promoteDept}
+          setDeptMode={setDeptModeChecked}
           category={category}
           setCategory={setCategory}
           unit={unit}
@@ -585,26 +650,47 @@ export function App() {
         />
       )}
       <main className={tab === 'help' ? 'help-main' : ''}>
-        {tab === 'dashboard' && (
-          <Dashboard
-            result={result}
-            summary={summary}
-            display={display}
-            unit={unit}
-            selectedMonth={selectedMonth}
-            setSelectedMonth={setSelectedMonth}
-            plan={plan}
-            category={category}
-            department={department}
-            actions={live.actions}
-            dirty={dirty}
-            savedScenario={savedResult.scenario}
-          />
-        )}
+        {tab === 'dashboard' &&
+          (deptMode === 'compare' && allSelectedDepartments.length > 1 ? (
+            <DepartmentCompare
+              departments={allSelectedDepartments}
+              category={category}
+              config={live}
+              plan={plan}
+              display={display}
+              focusDepartment={(d) => {
+                setDeptMode('single');
+                setDepartment(d);
+                setCmpDeptList([]);
+                setSelectedMonth(null);
+              }}
+            />
+          ) : (
+            <Dashboard
+              result={result}
+              chartResult={chartResult}
+              combined={
+                deptMode === 'combine' && allSelectedDepartments.length > 1
+              }
+              departmentCount={allSelectedDepartments.length}
+              summary={summary}
+              display={display}
+              unit={unit}
+              selectedMonth={selectedMonth}
+              setSelectedMonth={setSelectedMonth}
+              plan={plan}
+              category={category}
+              department={department}
+              actions={live.actions}
+              dirty={dirty}
+              savedScenario={savedResult.scenario}
+            />
+          ))}
         {tab === 'projects' && (
           <Projects
             config={live}
             department={department}
+            departments={allSelectedDepartments}
             category={category}
             result={result}
             mutate={mutate}
@@ -650,6 +736,7 @@ export function App() {
             config={live}
             category={category}
             setCategory={setCategory}
+            department={department}
             mutate={mutate}
           />
         )}
@@ -889,8 +976,10 @@ function CapacityActionMenu({
 }
 
 function ControlBar(p: {
-  department: string;
-  setDepartment: (v: string) => void;
+  departmentSelection: DepartmentSelectionState;
+  toggleDept: (d: string) => void;
+  promoteDept: (d: string) => void;
+  setDeptMode: (mode: DepartmentMode) => void;
   category: LaborCategory;
   setCategory: (v: LaborCategory) => void;
   unit: Unit;
@@ -905,19 +994,16 @@ function ControlBar(p: {
 }) {
   return (
     <section className="controls">
-      <Field
-        label="DEPARTMENT"
-        hint="Demand is filtered to the selected published department."
-      >
-        <select
-          value={p.department}
-          onChange={(e) => p.setDepartment(e.target.value)}
-        >
-          {DEPARTMENTS.map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-      </Field>
+      <DepartmentPicker
+        departments={DEPARTMENTS}
+        selection={p.departmentSelection}
+        toggle={p.toggleDept}
+        promote={p.promoteDept}
+        setMode={p.setDeptMode}
+        projectCount={(d) =>
+          PROJECTS.filter((project) => project.department === d).length
+        }
+      />
       <Field label="LABOR CATEGORY">
         <select
           value={p.category}
@@ -1017,6 +1103,9 @@ function Metric({
 
 function Dashboard({
   result,
+  chartResult,
+  combined,
+  departmentCount,
   summary,
   display,
   unit,
@@ -1030,6 +1119,14 @@ function Dashboard({
   savedScenario,
 }: {
   result: ReturnType<typeof analyze>;
+  /** Drives the demand chart, composition chart and month-detail drill-down
+   * only. In Combine mode this is the pooled result across every selected
+   * department; otherwise it is identical to `result`. Metric tiles,
+   * recommendations and the workflow timeline always use `result` (the lead
+   * department alone), never this one. */
+  chartResult: ReturnType<typeof analyze>;
+  combined: boolean;
+  departmentCount: number;
   summary: ReturnType<typeof metrics>;
   display: (v: number) => string;
   unit: Unit;
@@ -1044,16 +1141,16 @@ function Dashboard({
 }) {
   const data = MONTHS.map((month, i) => ({
     month,
-    hard: result.hard[i],
-    expected: result.expected[i],
-    scenario: result.scenario[i],
-    prefab: result.prefab[i],
-    existing: result.existing[i],
-    confirmed: result.confirmedHires[i],
-    planned: result.plannedHires[i],
-    subcontract: result.subcontract[i],
-    overtime: result.overtime[i],
-    gap: result.gap[i],
+    hard: chartResult.hard[i],
+    expected: chartResult.expected[i],
+    scenario: chartResult.scenario[i],
+    prefab: chartResult.prefab[i],
+    existing: chartResult.existing[i],
+    confirmed: chartResult.confirmedHires[i],
+    planned: chartResult.plannedHires[i],
+    subcontract: chartResult.subcontract[i],
+    overtime: chartResult.overtime[i],
+    gap: chartResult.gap[i],
     ghost: savedScenario[i],
   }));
   const recs = recommendations(result);
@@ -1135,12 +1232,23 @@ function Dashboard({
           detail={`${plan.name} · ${plan.status} · ${summary.unconfirmedPeak.toFixed(1)} FTE unconfirmed at peak.`}
         />
       </section>
+      {combined && (
+        <p className="info-note multi-department-note">
+          Demand and capacity are summed across {departmentCount} departments
+          below. Capacity above a department&apos;s own demand is not counted —
+          a surplus in one department cannot cover a shortage in another. The
+          tiles above, the workflow timeline and the recommendations still
+          reflect <strong>{department}</strong>, the lead department.
+        </p>
+      )}
       <section className="chart-card" data-tour="bottleneck-chart">
         <div className="card-heading">
           <div>
             <span>DEMAND VERSUS EXECUTABLE CAPACITY</span>
             <h2>
-              {category} — {department} · {plan.name}
+              {combined
+                ? `${category} — ${departmentCount} departments combined · ${plan.name}`
+                : `${category} — ${department} · ${plan.name}`}
             </h2>
           </div>
           <div className="chart-heading-controls">
@@ -1219,7 +1327,7 @@ function Dashboard({
                 angle={-45}
                 textAnchor="end"
                 tick={(props) => {
-                  const constrained = result.gap[props.index] > 0.05;
+                  const constrained = chartResult.gap[props.index] > 0.05;
                   return (
                     <Text
                       {...props}
@@ -1243,7 +1351,9 @@ function Dashboard({
                 }
               />
               <Tooltip
-                content={<PlannerTooltip result={result} display={display} />}
+                content={
+                  <PlannerTooltip result={chartResult} display={display} />
+                }
               />
               {MONTH_KEYS.includes(TODAY_MONTH_KEY) && (
                 <ReferenceLine
@@ -1305,7 +1415,7 @@ function Dashboard({
         </div>
       </section>
       <MonthlyCompositionChart
-        result={result}
+        result={chartResult}
         display={display}
         selectedMonth={selectedMonth}
         setSelectedMonth={setSelectedMonth}
@@ -1313,7 +1423,7 @@ function Dashboard({
       {selectedMonth !== null && (
         <MonthDetail
           index={selectedMonth}
-          result={result}
+          result={chartResult}
           display={display}
           close={() => setSelectedMonth(null)}
         />
@@ -1713,6 +1823,7 @@ function Timeline({ actions }: { actions: CapacityAction[] }) {
 function Projects({
   config,
   department,
+  departments,
   category,
   result,
   mutate,
@@ -1725,7 +1836,12 @@ function Projects({
   setSelectedMonth,
 }: {
   config: ScenarioConfig;
+  /** The lead department — PortfolioOverlap stays scoped to this one alone. */
   department: string;
+  /** Every department in the current selection (Single: just the lead;
+   * Compare/Combine: the lead plus the comparison list). The projects table
+   * above PortfolioOverlap is scoped to all of these. */
+  departments: string[];
   category: LaborCategory;
   result: ReturnType<typeof analyze>;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
@@ -1737,12 +1853,14 @@ function Projects({
   setTab: (t: Tab) => void;
   setSelectedMonth: (v: number | null) => void;
 }) {
-  const visibleProjects = PROJECTS.filter(
-    (project) => project.department === department,
+  const visibleProjects = PROJECTS.filter((project) =>
+    departments.includes(project.department),
   );
-  const visibleProposed = config.proposedProjects.filter(
-    (project) => project.department === department,
+  const visibleProposed = config.proposedProjects.filter((project) =>
+    departments.includes(project.department),
   );
+  const hiddenCount = PROJECTS.length - visibleProjects.length;
+  const showDepartmentDot = departments.length > 1;
   return (
     <section className="screen-card">
       <div className="section-title">
@@ -1754,6 +1872,16 @@ function Projects({
             proposed scenario{' '}
             {visibleProposed.length === 1 ? 'project' : 'projects'}
           </p>
+          {hiddenCount > 0 && (
+            <p>
+              {hiddenCount}{' '}
+              {hiddenCount === 1
+                ? 'project in another department is'
+                : 'projects in other departments are'}{' '}
+              not shown. Capacity belongs to its department, so they cannot
+              affect this plan.
+            </p>
+          )}
         </div>
         <button
           onClick={() =>
@@ -1816,6 +1944,17 @@ function Projects({
                       {p.name}
                     </button>
                     <small>
+                      {showDepartmentDot && (
+                        <span
+                          className="dept-picker-dot"
+                          style={{
+                            background: departmentColor(
+                              departments.indexOf(p.department),
+                            ),
+                          }}
+                          aria-hidden="true"
+                        />
+                      )}
                       {p.department} · {p.primaryLabor}
                     </small>
                   </td>
@@ -1967,7 +2106,20 @@ function Projects({
                   >
                     {proposed.name}
                   </button>
-                  <small>{proposed.department}</small>
+                  <small>
+                    {showDepartmentDot && (
+                      <span
+                        className="dept-picker-dot"
+                        style={{
+                          background: departmentColor(
+                            departments.indexOf(proposed.department),
+                          ),
+                        }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    {proposed.department}
+                  </small>
                 </td>
                 <td>Proposed</td>
                 <td>${proposed.value.toFixed(1)}M</td>
@@ -2822,16 +2974,18 @@ function Capacity({
   config,
   category,
   setCategory,
+  department,
   mutate,
 }: {
   config: ScenarioConfig;
   category: LaborCategory;
   setCategory: (c: LaborCategory) => void;
+  department: string;
   mutate: (fn: (c: ScenarioConfig) => void) => void;
 }) {
   const selected = config.capacity[category];
   const fields: [keyof typeof selected, string][] = [
-    ['headcount', 'Headcount'],
+    ['headcount', 'Company headcount'],
     ['prefabCapacity', 'Prefab shop cap.'],
     ['productiveHours', 'Prod hrs/person/mo'],
     ['hourlyRate', 'Std cost/hour'],
@@ -2857,11 +3011,18 @@ function Capacity({
             <p>Inputs update every analysis view immediately.</p>
           </div>
         </div>
+        <p className="info-note">
+          Headcount is maintained company-wide. A per-department roster split
+          from the data pipeline isn&apos;t published yet — until then, the
+          dashboard uses each category&apos;s full company headcount for every
+          department, including {department}.
+        </p>
         <div className="table-scroll">
           <table className="capacity-table">
             <thead>
               <tr>
                 <th>LABOR CATEGORY</th>
+                <th>THIS DEPT ROSTER</th>
                 {fields.map(([, label]) => (
                   <th key={label}>{label}</th>
                 ))}
@@ -2880,6 +3041,14 @@ function Capacity({
                       >
                         {cat}
                       </button>
+                    </td>
+                    <td>
+                      <span
+                        className="dept-picker-dot"
+                        style={{ background: '#EFEEEC' }}
+                        aria-hidden="true"
+                      />
+                      <small>Not yet available</small>
                     </td>
                     {fields.map(([key, fieldLabel]) => (
                       <td key={key}>
@@ -2934,9 +3103,9 @@ function Capacity({
           <h2>{category}</h2>
         </header>
         <Metric
-          label="RAW HEADCOUNT"
+          label="COMPANY HEADCOUNT"
           value={`${selected.headcount}`}
-          detail="Department-owned workforce"
+          detail="Not yet split by department"
         />
         <Metric
           label="PRE-FAB SHOP CAPACITY"

@@ -395,6 +395,82 @@ export function metrics(r: AnalysisResult) {
   };
 }
 
+// Pools two or more analyze() results into one (e.g. several departments,
+// same labor category) — per the design handoff's `sumSeries`. Demand
+// arrays sum as-is; capacity arrays are clamped by each result's own
+// total-vs-scenario ratio first, so capacity beyond what that result's own
+// demand needed is not counted — a surplus in one department/category never
+// covers a shortage in another. `gap` is summed directly, never recomputed
+// from the summed totals, so the hatched shortfall always equals the sum of
+// the per-result gaps.
+export function combineResults(results: AnalysisResult[]): AnalysisResult {
+  if (results.length === 1) return results[0];
+  const sums = {
+    hard: zeros(),
+    expected: zeros(),
+    scenario: zeros(),
+    proposed: zeros(),
+    prefab: zeros(),
+    existing: zeros(),
+    confirmedHires: zeros(),
+    plannedHires: zeros(),
+    subcontract: zeros(),
+    overtime: zeros(),
+    total: zeros(),
+    gap: zeros(),
+    unconfirmed: zeros(),
+  };
+  const driverMaps = Array.from(
+    { length: N },
+    () => new Map<string, { name: string; type: string; fte: number }>(),
+  );
+  results.forEach((r) => {
+    for (let i = 0; i < N; i++) {
+      const f =
+        r.total[i] > r.scenario[i] && r.total[i] > 0
+          ? r.scenario[i] / r.total[i]
+          : 1;
+      sums.hard[i] += r.hard[i];
+      sums.expected[i] += r.expected[i];
+      sums.scenario[i] += r.scenario[i];
+      sums.proposed[i] += r.proposed[i];
+      sums.prefab[i] += r.prefab[i] * f;
+      sums.existing[i] += r.existing[i] * f;
+      sums.confirmedHires[i] += r.confirmedHires[i] * f;
+      sums.plannedHires[i] += r.plannedHires[i] * f;
+      sums.subcontract[i] += r.subcontract[i] * f;
+      sums.overtime[i] += r.overtime[i] * f;
+      sums.total[i] += r.total[i] * f;
+      sums.gap[i] += r.gap[i];
+      sums.unconfirmed[i] += r.unconfirmed[i] * f;
+      r.drivers[i].forEach((d) => {
+        const existing = driverMaps[i].get(d.name);
+        if (existing) existing.fte += d.fte;
+        else driverMaps[i].set(d.name, { ...d });
+      });
+    }
+  });
+  const drivers = driverMaps.map((m) =>
+    [...m.values()].sort((a, b) => b.fte - a.fte),
+  );
+  return {
+    hard: sums.hard.map(round3),
+    expected: sums.expected.map(round3),
+    scenario: sums.scenario.map(round3),
+    proposed: sums.proposed.map(round3),
+    drivers,
+    prefab: sums.prefab.map(round3),
+    existing: sums.existing.map(round3),
+    confirmedHires: sums.confirmedHires.map(round3),
+    plannedHires: sums.plannedHires.map(round3),
+    subcontract: sums.subcontract.map(round3),
+    overtime: sums.overtime.map(round3),
+    total: sums.total.map(round3),
+    gap: sums.gap.map(round3),
+    unconfirmed: sums.unconfirmed.map(round3),
+  };
+}
+
 export function formatValue(
   fte: number,
   unit: Unit,

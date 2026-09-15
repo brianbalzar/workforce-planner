@@ -5,12 +5,13 @@ import {
   LABOR_SOURCE_MAP,
   PROJECTS,
 } from '../data/sampleData';
-import { PROJECTS as RUNTIME_PROJECTS } from '../data/runtimeData';
+import { DEPARTMENTS, PROJECTS as RUNTIME_PROJECTS } from '../data/runtimeData';
 import {
   actionStartDate,
   activeRange,
   analyze,
   assumptionFlagsForProject,
+  combineResults,
   demand,
   forecastFreshness,
   formatValue,
@@ -421,6 +422,118 @@ describe('portfolio overlap timeline', () => {
     const hardProjects = PROJECTS.filter((p) => p.type === 'Hard');
     hardProjects.forEach((p) => {
       expect(p.location).toBeTruthy();
+    });
+  });
+});
+
+describe('combineResults (department/category pooling)', () => {
+  const N = 18;
+  const zeros = () => Array(N).fill(0);
+  // Every field defaults to 18 zero months; `at0` overrides just month 0 so
+  // tests can state a single number without hand-building 18-slot arrays.
+  const at0 = (value: number) => zeros().map((_, i) => (i === 0 ? value : 0));
+  const fakeResult = (over: Partial<ReturnType<typeof analyze>>) => ({
+    hard: zeros(),
+    expected: zeros(),
+    scenario: zeros(),
+    proposed: zeros(),
+    drivers: zeros().map(() => []),
+    prefab: zeros(),
+    existing: zeros(),
+    confirmedHires: zeros(),
+    plannedHires: zeros(),
+    subcontract: zeros(),
+    overtime: zeros(),
+    total: zeros(),
+    gap: zeros(),
+    unconfirmed: zeros(),
+    ...over,
+  });
+
+  it('returns the single result unchanged when there is only one', () => {
+    const r = fakeResult({ scenario: at0(5) });
+    expect(combineResults([r])).toBe(r);
+  });
+
+  it('sums demand arrays as-is, and gap directly rather than recomputing', () => {
+    const a = fakeResult({
+      hard: at0(1),
+      expected: at0(2),
+      scenario: at0(10),
+      existing: at0(4),
+      total: at0(4),
+      gap: at0(6),
+    });
+    const b = fakeResult({
+      hard: at0(3),
+      expected: at0(4),
+      scenario: at0(5),
+      existing: at0(5),
+      total: at0(5),
+      gap: at0(0),
+    });
+    const combined = combineResults([a, b]);
+    expect(combined.hard[0]).toBe(4);
+    expect(combined.expected[0]).toBe(6);
+    expect(combined.scenario[0]).toBe(15);
+    // gap summed directly (6 + 0), not recomputed from summed scenario/total.
+    expect(combined.gap[0]).toBe(6);
+  });
+
+  it('clamps each result’s capacity by its own total-vs-scenario ratio before summing, so a surplus in one never covers a shortage in another', () => {
+    // a: needs 10, only has 4 of capacity -> fully used, f = 1.
+    const a = fakeResult({
+      scenario: at0(10),
+      existing: at0(4),
+      total: at0(4),
+      gap: at0(6),
+    });
+    // b: needs 5, has 20 of capacity -> only 5 of it "counts", f = 5/20 = 0.25.
+    const b = fakeResult({
+      scenario: at0(5),
+      existing: at0(20),
+      total: at0(20),
+      gap: at0(0),
+    });
+    const combined = combineResults([a, b]);
+    // existing: 4*1 + 20*0.25 = 4 + 5 = 9
+    expect(combined.existing[0]).toBeCloseTo(9, 3);
+    expect(combined.total[0]).toBeCloseTo(9, 3);
+    // The combined gap is the sum of the per-result gaps (6 + 0 = 6), which
+    // also matches scenario(15) - clamped total(9) exactly in this case.
+    expect(combined.gap[0]).toBeCloseTo(6, 3);
+    expect(combined.scenario[0]).toBe(15);
+  });
+
+  it('merges month drivers by project name, adding values', () => {
+    type Driver = { name: string; type: string; fte: number };
+    const drivers = () => zeros().map(() => [] as Driver[]);
+    const aDrivers = drivers();
+    aDrivers[0] = [{ name: 'Project X', type: 'Hard backlog', fte: 2 }];
+    const bDrivers = drivers();
+    bDrivers[0] = [
+      { name: 'Project X', type: 'Hard backlog', fte: 1 },
+      { name: 'Project Y', type: 'Soft backlog', fte: 3 },
+    ];
+    const a = fakeResult({ drivers: aDrivers });
+    const b = fakeResult({ drivers: bDrivers });
+    const combined = combineResults([a, b]);
+    // Project X: 2 + 1 = 3 total, tied with Project Y's 3 — insertion order
+    // (X first) breaks the tie since the sort is stable.
+    expect(combined.drivers[0]).toEqual([
+      { name: 'Project X', type: 'Hard backlog', fte: 3 },
+      { name: 'Project Y', type: 'Soft backlog', fte: 3 },
+    ]);
+  });
+
+  it('combining a department with itself doubles demand but never double-counts spare capacity', () => {
+    const cfg = growth();
+    const dept = DEPARTMENTS[0];
+    const r = analyze(cfg, 'Plumber', dept);
+    const combined = combineResults([r, r]);
+    r.scenario.forEach((v, i) => {
+      expect(combined.scenario[i]).toBeCloseTo(v * 2, 6);
+      expect(combined.gap[i]).toBeCloseTo(r.gap[i] * 2, 6);
     });
   });
 });
