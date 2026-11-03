@@ -6,6 +6,7 @@ import { loadPlannerData, validatePlannerData } from './data/plannerDataLoader';
 import { activatePlannerData } from './data/runtimeData';
 import { resetPlans } from './persistence/planStore';
 import './ui/styles.css';
+import { WorkforceSuite } from './suite/App';
 
 const root = createRoot(document.getElementById('root')!);
 
@@ -27,6 +28,11 @@ function renderApp() {
   root.render(
     <StrictMode>
       <ErrorBoundary>
+        <div className="legacy-suite-return">
+          <a href="#/projects/overview">
+            ← Projects, Service & Talent Acquisition
+          </a>
+        </div>
         <App />
       </ErrorBoundary>
     </StrictMode>,
@@ -68,6 +74,9 @@ function DataImportGate() {
   return (
     <main className="data-import-gate">
       <section aria-labelledby="import-title">
+        <a href="#/projects/overview">
+          ← Projects, Service & Talent Acquisition
+        </a>
         <span className="data-import-eyebrow">WORKFORCE PLANNER</span>
         <h1 id="import-title">Open your workforce dataset</h1>
         <p>
@@ -104,6 +113,16 @@ function DataImportGate() {
 }
 
 async function bootstrap() {
+  if (!window.location.hash.startsWith('#/legacy')) {
+    root.render(
+      <StrictMode>
+        <ErrorBoundary>
+          <WorkforceSuite />
+        </ErrorBoundary>
+      </StrictMode>,
+    );
+    return;
+  }
   if (import.meta.env.VITE_DATA_MODE === 'upload') {
     // The public/dataless build must never revive a workforce plan from an
     // earlier visit. Only the non-sensitive guided-tour preference remains.
@@ -130,3 +149,14 @@ async function bootstrap() {
 }
 
 void bootstrap();
+
+// Pages uses hash routes; entering/leaving the retained monthly workspace
+// mounts its existing import flow without interfering with suite subroutes.
+let legacyRoute = window.location.hash.startsWith('#/legacy');
+window.addEventListener('hashchange', () => {
+  const next = window.location.hash.startsWith('#/legacy');
+  if (next !== legacyRoute) {
+    legacyRoute = next;
+    void bootstrap();
+  }
+});
