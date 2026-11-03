@@ -793,9 +793,7 @@ function Suite({
       {page !== 'roadmap' && (
         <div className="ws-controls">
           <label>
-            <span className="ws-eyebrow">
-              Scenario · shared across all areas
-            </span>
+            <span className="ws-eyebrow">Scenario · shared plan</span>
             <select
               aria-label="Scenario"
               value={scenarioId}
@@ -1606,7 +1604,17 @@ function Suite({
           </>
         )}
 
-        {page === 'forecast' && (
+        {page === 'forecast' && !Object.keys(d.dispatch_actuals).length && (
+          <Card title="Trade-level timesheets have not been supplied">
+            <Empty title="No dispatch feed to reconcile">
+              This dataset has no trade-level dispatch history. Project
+              forecasts remain available in Projects, where you can edit future
+              weekly hours. No automatic forecast adjustments or PM review
+              decisions are generated from missing actuals.
+            </Empty>
+          </Card>
+        )}
+        {page === 'forecast' && Object.keys(d.dispatch_actuals).length > 0 && (
           <>
             <div className="ws-intro">
               <span className="ws-eyebrow">

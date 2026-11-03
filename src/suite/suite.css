@@ -1399,3 +1399,29 @@
   color: #0068c7;
   text-decoration: none;
 }
+@media (min-width: 1100px) {
+  .ws-controls {
+    gap: 12px;
+  }
+  .ws-controls > label:first-child {
+    width: 165px;
+    min-width: 165px;
+    max-width: 165px;
+  }
+  .ws-controls label > select {
+    min-width: 165px;
+  }
+  .ws-controls .ws-picker {
+    min-width: 155px;
+    max-width: 200px;
+  }
+  .ws-controls .ws-segments button {
+    padding-inline: 8px;
+  }
+  .ws-controls .ws-check small {
+    max-width: 70px;
+  }
+  .ws-controls .ws-eyebrow {
+    letter-spacing: 0.055em;
+  }
+}

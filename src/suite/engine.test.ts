@@ -33,6 +33,22 @@ const data = sampleDataset();
 const base = () => clone(data.scenarios[0].snap);
 
 describe('weekly artifact calculation regressions', () => {
+  it('restores kind-specific lead defaults when an editor changes action type', () => {
+    const hire = makeAction(data, {
+      kind: 'hire',
+      dk: 'GW',
+      tk: 'PF',
+      qty: 1,
+      from: 16,
+    });
+    const overtime = makeAction(data, {
+      ...hire,
+      kind: 'overtime',
+      lead: undefined,
+    });
+    expect(overtime.lead).toEqual({ notice: 7 });
+    expect(timeline(overtime, data).actBy).toBe(15);
+  });
   it('matches every hard-job reforecast line in the supplied golden fixture', () => {
     for (const expected of golden) {
       const p = data.projects.projects.find((p) => p.id === expected.pid)!;

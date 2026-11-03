@@ -129,7 +129,6 @@ export function makeAction(
       kind === 'hire' || kind === 'attrition'
         ? d.reference.constants.FUT - 1
         : args.from + 7,
-    lead: clone(lead),
     rate: d.reference.loadedRates[args.tk],
     cost: Math.round(d.reference.loadedRates[args.tk] * 1.55),
     owner:
@@ -139,6 +138,7 @@ export function makeAction(
     sourceType: 'External',
     costBasis: 'per hour',
     ...args,
+    lead: clone(args.lead ?? lead),
   };
 }
 
