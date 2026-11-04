@@ -20,6 +20,18 @@ export const fmt = (n: number, digits = 0) =>
 export const money = (n: number) =>
   n >= 1e6 ? `$${fmt(n / 1e6, 1)}M` : `$${fmt(n)}`;
 export type Units = 'People' | 'Hours' | 'Cost';
+export const SERIES_COLORS = [
+  '#0068cc',
+  '#2a9787',
+  '#7d62b5',
+  '#c99a14',
+  '#c1563c',
+  '#66788c',
+  '#26313d',
+  '#b0457a',
+  '#2a8558',
+];
+
 export function ShortfallChart({
   data,
   cube,
@@ -35,17 +47,7 @@ export function ShortfallChart({
   horizon: number;
   onSelect: (i: number, tk: TradeKey) => void;
 }) {
-  const colors = [
-    '#0068cc',
-    '#2a9787',
-    '#7d62b5',
-    '#c99a14',
-    '#c1563c',
-    '#66788c',
-    '#26313d',
-    '#b0457a',
-    '#2a8558',
-  ];
+  const colors = SERIES_COLORS;
   const weeks = data.weeks.slice(
     data.reference.constants.PAST,
     data.reference.constants.PAST + horizon,
