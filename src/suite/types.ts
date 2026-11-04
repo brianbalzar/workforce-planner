@@ -358,6 +358,31 @@ export interface Scenario {
 }
 
 // ---------- workforce-sample.json (all of the above in one file) ----------
+export interface ApprovedLaborRecord {
+  id: string;
+  weekStart: string;
+  dept: DeptKey;
+  job: string;
+  sourceDepartment: string;
+  laborType: string | null;
+  trade: TradeKey | null;
+  classification: 'verified' | 'unclassified';
+  evidence: string;
+  hours: Record<'RT' | 'OT' | 'PR' | 'DT' | 'PTO', number>;
+  sourceRows: number;
+}
+
+/** Source history kept apart from dispatched craft actuals and reforecasting. */
+export interface ApprovedLaborFile {
+  asOf: string;
+  periodStart: string;
+  periodEnd: string;
+  approvalStatus: 'APPROVED';
+  source: string;
+  notes: string[];
+  records: ApprovedLaborRecord[];
+}
+
 export interface WorkforceSample {
   schemaVersion: string;
   generatedFrom: string;
@@ -366,6 +391,7 @@ export interface WorkforceSample {
   crews: Crews;
   projects: ProjectsFile;
   dispatch_actuals: DispatchActuals;
+  labor_actuals?: ApprovedLaborFile;
   capacity_actions: CapacityActionsFile;
   service: ServiceFile;
   scenarios: Scenario[];
