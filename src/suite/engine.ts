@@ -957,6 +957,41 @@ export function aggregate(
       capacity: sum(cells.map((c) => c.cap)),
       gap: sum(cells.map((c) => c.gap)),
       spare: sum(cells.map((c) => c.spare)),
+      historyPlan: sum(cells.map((c) => c.historyPlan)),
+      ...capacityLayers(cells, i < d.reference.constants.PAST),
     };
   });
+}
+
+/** Chart layers, summed department-category by department-category (never
+ * netted): the capacity each cell can put to work against its own workload,
+ * the gap left above it, and the spare crew it can't use. */
+export function capacityLayers(cells: Cell[], history: boolean) {
+  const o = {
+    uConf: 0,
+    uAssumed: 0,
+    uRoster: 0,
+    uConfirmed: 0,
+    uPlanned: 0,
+    shortPlan: 0,
+    shortConf: 0,
+    open: 0,
+  };
+  for (const c of cells) {
+    const dem = history ? c.historyPlan : total(c);
+    const uConf = Math.min(c.capConf, dem),
+      uAll = Math.min(c.cap, dem),
+      f = c.cap > 0 ? Math.min(1, dem / c.cap) : 0;
+    o.uConf += uConf;
+    o.uAssumed += uAll - uConf;
+    o.uRoster += c.roster * f;
+    o.uConfirmed += c.confirmed * f;
+    o.uPlanned += c.planned * f;
+    o.open += Math.max(0, c.cap - uAll);
+    if (!history) {
+      o.shortPlan += Math.max(0, dem - c.cap);
+      o.shortConf += Math.max(0, dem - c.capConf);
+    }
+  }
+  return o;
 }

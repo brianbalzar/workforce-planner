@@ -1,13 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import {
-  Download,
-  FileUp,
-  Plus,
-  Save,
-  X,
-  ArrowRight,
-  ChevronDown,
-} from 'lucide-react';
+import { Download, FileUp, Plus, Save, X, ArrowRight } from 'lucide-react';
 import logo from '../assets/upchurch-light.png';
 import { validatePlannerData } from '../data/plannerDataLoader';
 import { adaptMonthly } from './monthlyAdapter';
@@ -69,8 +61,16 @@ import {
   Segments,
   Timeline,
   type Units,
+  SERIES_COLORS,
 } from './Charts';
 import './suite.css';
+import { CapacityChart } from './CapacityChart';
+import {
+  DepartmentPicker,
+  TradePicker,
+  type DeptRow,
+  type TradeRow,
+} from './Pickers';
 
 type Area = 'projects' | 'service' | 'hiring';
 type Page =
@@ -499,6 +499,34 @@ function Suite({
     (a) => depts.includes(a.dk) && trades.includes(a.tk),
   );
   const rows = aggregate(d, cube, depts, trades);
+  const deptRows: DeptRow[] = availableDepts.map((k) => {
+    const ref = d.reference.departments.find((v) => v.k === k);
+    const svc = ref?.group === 'Service';
+    return {
+      k,
+      name: ref?.name ?? k,
+      group: ref?.group ?? '',
+      count: svc
+        ? d.service.agreements.length
+        : projects.filter(
+            (p) =>
+              weight(snap, p) > 0 &&
+              (p.dept === k ||
+                (Object.keys(p.plan) as TradeKey[]).some(
+                  (tk) => route(p, tk) === k,
+                )),
+          ).length,
+      unit: svc ? 'agreements' : 'jobs',
+    };
+  });
+  const pickerWeeks = d.weeks.slice(PAST, PAST + horizon);
+  const tradeRows: TradeRow[] = availableTrades.map((tk) => ({
+    k: tk,
+    name: tradeName(tk),
+    gap: pickerWeeks.map(
+      (w) => sum(depts.map((dk) => cube[dk]?.[tk]?.[w.i]?.gap ?? 0)) / HPF,
+    ),
+  }));
   const allCells = depts.flatMap((dk) =>
     trades.flatMap((tk) =>
       (cube[dk]?.[tk] ?? [])
@@ -792,136 +820,88 @@ function Suite({
       </div>
       {page !== 'roadmap' && (
         <div className="ws-controls">
-          <label>
-            <span className="ws-eyebrow">Scenario · shared plan</span>
-            <select
-              aria-label="Scenario"
-              value={scenarioId}
-              onChange={(e) => chooseScenario(e.target.value)}
-            >
-              {seeds.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-              {saved.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="ws-control-actions">
-            <button
-              onClick={() => {
-                setSaveName(`${scenarioName} copy`);
-                setSaveModal(true);
-              }}
-            >
-              Save as…
-            </button>
-            {currentSaved && (
-              <button
-                disabled={!dirty}
-                onClick={() => saveScenario(currentSaved.name, true)}
+          <div className="ws-selectors">
+            <div className="ws-scn">
+              <label
+                className="ws-inline"
+                title="Shared across Projects, Service and Talent Acquisition"
               >
-                <Save size={14} />
-                Save
+                <span className="ws-eyebrow">Scenario</span>
+                <select
+                  aria-label="Scenario"
+                  value={scenarioId}
+                  onChange={(e) => chooseScenario(e.target.value)}
+                >
+                  {seeds.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                  {saved.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {dirty && (
+                <>
+                  <span className="ws-scn-dirty">Unsaved changes</span>
+                  <button
+                    type="button"
+                    className="ws-pk-link muted"
+                    onClick={() => {
+                      setHistory((prev) => [...prev.slice(-19), clone(snap)]);
+                      setSnap(clone(baseline));
+                    }}
+                  >
+                    Revert
+                  </button>
+                </>
+              )}
+              {currentSaved && dirty && (
+                <button
+                  type="button"
+                  className="ws-scn-save"
+                  onClick={() => saveScenario(currentSaved.name, true)}
+                >
+                  <Save size={14} />
+                  Save
+                </button>
+              )}
+              <button
+                type="button"
+                className="ws-pk-link"
+                onClick={() => {
+                  setSaveName(`${scenarioName} copy`);
+                  setSaveModal(true);
+                }}
+              >
+                Save as…
               </button>
-            )}
-          </div>
-          <div className="ws-picker">
-            <span className="ws-eyebrow">Department</span>
-            <button
-              aria-expanded={picker === 'departments'}
-              onClick={() =>
-                setPicker(picker === 'departments' ? null : 'departments')
+            </div>
+            <DepartmentPicker
+              rows={deptRows}
+              selected={depts}
+              onChange={(next) =>
+                setDeptSelection((p) => ({ ...p, [area]: next }))
               }
-            >
-              {depts.length === availableDepts.length
-                ? 'All departments'
-                : depts.map(deptName).join(', ')}
-              <ChevronDown size={14} />
-              <small>{depts.length} selected · gaps kept separate</small>
-            </button>
-            {picker === 'departments' && (
-              <div className="ws-picker-menu">
-                <button
-                  onClick={() =>
-                    setDeptSelection((p) => ({ ...p, [area]: availableDepts }))
-                  }
-                >
-                  Select all
-                </button>
-                {availableDepts.map((k) => (
-                  <label key={k}>
-                    <input
-                      type="checkbox"
-                      checked={depts.includes(k)}
-                      onChange={(e) =>
-                        setDeptSelection((p) => ({
-                          ...p,
-                          [area]: e.target.checked
-                            ? [...depts, k]
-                            : depts.length > 1
-                              ? depts.filter((v) => v !== k)
-                              : depts,
-                        }))
-                      }
-                    />
-                    {deptName(k)}
-                  </label>
-                ))}
-                <button onClick={() => setPicker(null)}>Done</button>
-              </div>
-            )}
-          </div>
-          <div className="ws-picker">
-            <span className="ws-eyebrow">Labor categories</span>
-            <button
-              aria-expanded={picker === 'trades'}
-              onClick={() => setPicker(picker === 'trades' ? null : 'trades')}
-            >
-              {trades.length === availableTrades.length
-                ? 'All labor categories'
-                : trades.map(tradeName).join(', ')}
-              <ChevronDown size={14} />
-              <small>{trades.length} selected</small>
-            </button>
-            {picker === 'trades' && (
-              <div className="ws-picker-menu">
-                <button
-                  onClick={() =>
-                    setTradeSelection((p) => ({
-                      ...p,
-                      [area]: availableTrades,
-                    }))
-                  }
-                >
-                  Select all
-                </button>
-                {availableTrades.map((k) => (
-                  <label key={k}>
-                    <input
-                      type="checkbox"
-                      checked={trades.includes(k)}
-                      onChange={(e) =>
-                        setTradeSelection((p) => ({
-                          ...p,
-                          [area]: e.target.checked
-                            ? [...trades, k]
-                            : trades.length > 1
-                              ? trades.filter((v) => v !== k)
-                              : trades,
-                        }))
-                      }
-                    />
-                    {tradeName(k)}
-                  </label>
-                ))}
-                <button onClick={() => setPicker(null)}>Done</button>
-              </div>
-            )}
+              open={picker === 'departments'}
+              onOpen={() => setPicker('departments')}
+              onClose={() => setPicker(null)}
+            />
+            <TradePicker
+              rows={tradeRows}
+              selected={trades}
+              colors={SERIES_COLORS}
+              horizon={horizon}
+              onChange={(next) =>
+                setTradeSelection((p) => ({ ...p, [area]: next }))
+              }
+              open={picker === 'trades'}
+              onOpen={() => setPicker('trades')}
+              onClose={() => setPicker(null)}
+            />
           </div>
           <Segments
             label="Soft backlog"
@@ -1155,20 +1135,27 @@ function Suite({
                   onChange={setHorizon}
                 />
               </div>
-              <Chart
+              <CapacityChart
                 data={d}
                 rows={rows}
                 units={units}
                 horizon={horizon}
+                basis={basis}
+                rate={50}
                 components={chartMode === 'Components'}
+                workloadLabel={`Total workload: signed${snap.softMode === 'off' ? '' : snap.softMode === 'all' ? ' + soft backlog at 100%' : ' + soft backlog at confidence'}${snap.includeProposed ? ' + proposed' : ''}`}
                 onSelect={(i) => selectWeek(i)}
                 selected={selected?.i}
               />
               <p className="ws-fine">
-                Departments keep separate crews. The combined chart can show
-                both a shortage and spare capacity in the same week. People =
-                productive hours ÷ {HPF}. Cost is an indicative $50/hour blended
-                display; action costs use trade-specific rates.
+                {chartMode === 'Summary'
+                  ? 'Bars show the crew each department can put to work, then the unresolved gap up to the workload line, then any spare crew above it. Confirmed capacity is crew already secured. Hatched amber is capacity the plan counts on but hasn’t secured yet. Switch to Components to see every layer.'
+                  : 'Cross-hatched layers still need a decision: planned capacity isn’t secured yet, and the unresolved gap has no labor assigned.'}{' '}
+                Gaps are counted department by department and category by
+                category, so a combined week can show both a gap below the
+                workload line and spare capacity above it. People = productive
+                hours ÷ {HPF}. Cost is an indicative $50/hour blended display;
+                action costs use trade-specific rates.
               </p>
               {snap.actions.length > 0 && (
                 <div className="ws-plan-strip">
