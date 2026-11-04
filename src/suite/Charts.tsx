@@ -422,7 +422,9 @@ export function Chart({
         <text x={left + 8} y={top + 15}>
           {values.slice(0, PAST).some((r) => r.actual !== undefined)
             ? 'History · logged hours'
-            : 'History · no timesheet feed'}
+            : data.labor_actuals
+              ? 'History · craft actuals incomplete'
+              : 'History · no timesheet feed'}
         </text>
         {values.map((r, j) => (
           <rect

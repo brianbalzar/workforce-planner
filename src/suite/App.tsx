@@ -65,6 +65,7 @@ import {
 } from './Charts';
 import './suite.css';
 import { CapacityChart } from './CapacityChart';
+import { LaborHistory } from './LaborHistory';
 import {
   DepartmentPicker,
   TradePicker,
@@ -1090,7 +1091,11 @@ function Suite({
             </div>
             <Card
               title="Labor capacity vs. workload"
-              subtitle="Eight weeks of dispatch history, then the forecast. Select a week to inspect the jobs behind it."
+              subtitle={
+                d.labor_actuals && !Object.keys(d.dispatch_actuals).length
+                  ? 'Approved source hours are listed below; trade-linked actuals are incomplete. Select a week to inspect the jobs behind the forecast.'
+                  : 'Eight weeks of dispatch history, then the forecast. Select a week to inspect the jobs behind it.'
+              }
               tools={
                 <>
                   <button onClick={addAction}>
@@ -1171,6 +1176,18 @@ function Suite({
               )}
             </Card>
             {drilldown}
+            <LaborHistory
+              data={d}
+              depts={depts}
+              trades={trades}
+              jobs={
+                new Set(
+                  projects
+                    .filter((p) => p.type === 'hard' && weight(snap, p) > 0)
+                    .map((p) => p.id),
+                )
+              }
+            />
             <Card
               title="Shortfall by labor category"
               subtitle="People short each week, summed department by department. Surplus in another department never cancels a shortage."
@@ -1598,6 +1615,8 @@ function Suite({
               forecasts remain available in Projects, where you can edit future
               weekly hours. No automatic forecast adjustments or PM review
               decisions are generated from missing actuals.
+              {d.labor_actuals &&
+                ' Approved source hours are available in the history table on Overview; unclassified hours are kept out of trade-level reconciliation.'}
             </Empty>
           </Card>
         )}
@@ -1752,6 +1771,9 @@ function Suite({
           </>
         )}
 
+        {page === 'outlook' && (
+          <LaborHistory data={d} depts={depts} trades={trades} />
+        )}
         {page === 'outlook' &&
           !d.service.agreements.length &&
           !d.service.openJobs.length && (

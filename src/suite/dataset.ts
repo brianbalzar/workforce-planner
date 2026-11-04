@@ -5,6 +5,7 @@ import type {
   WorkforceSample,
 } from './types';
 import { clone } from './engine';
+import { validateLaborActuals } from './laborActuals';
 
 export function sampleDataset(): WorkforceSample {
   const d = clone(raw) as unknown as WorkforceSample;
@@ -449,6 +450,7 @@ export function validateDataset(value: unknown): WorkforceSample {
       )
     )
       throw new Error('Service call history requires twelve monthly values.');
+  validateLaborActuals(d.labor_actuals, d);
   return clone(d);
 }
 
@@ -473,6 +475,7 @@ export function datasetId(d: WorkforceSample) {
     d.dispatch_actuals,
     d.capacity_actions,
     d.service,
+    ...(d.labor_actuals ? [d.labor_actuals] : []),
   ]);
   let hash = 2166136261;
   for (let i = 0; i < text.length; i++)

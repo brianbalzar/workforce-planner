@@ -290,7 +290,11 @@ export function CapacityChart({
             This week
           </text>
           <text x={L + 4} y={T + 12} className="ax">
-            {hasActual ? 'History · dispatched' : 'History · no timesheet feed'}
+            {hasActual
+              ? 'History · dispatched'
+              : data.labor_actuals
+                ? 'History · craft actuals incomplete'
+                : 'History · no timesheet feed'}
           </text>
           {values.map((r, j) =>
             selected === r.i ? (
